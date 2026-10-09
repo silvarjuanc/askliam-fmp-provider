@@ -23,9 +23,7 @@ class ExistingFMPStage0Adapter:
             raise RuntimeError("PROVIDER_AUTH_OR_TLS_NOT_CONFIGURED")
 
     def __call__(self):
-        raw = self.spreadsheet.worksheet("Universe").get_all_records(
-            expected_headers=[], numericise_ignore=["all"]
-        )
+        raw = self.spreadsheet.worksheet("Universe").get_all_records(numericise_ignore=["all"])
         priority = []
         for item in raw:
             if str(item.get("Analysis Enabled", "")).upper() != "TRUE":
@@ -38,9 +36,7 @@ class ExistingFMPStage0Adapter:
 
         # Stage 0 queue; existing workbook SNAPSHOT is the source of previous
         # provider-deferred state. Prioritize deferred/missing before other assets.
-        snapshots = self.spreadsheet.worksheet("Market_Data_Snapshot").get_all_records(
-            expected_headers=[], numericise_ignore=["all"]
-        )
+        snapshots = self.spreadsheet.worksheet("Market_Data_Snapshot").get_all_records(numericise_ignore=["all"])
         deferred = {
             str(row.get("canonical_symbol", "")).upper()
             for row in snapshots
@@ -123,7 +119,10 @@ class ExistingFMPStage0Adapter:
                 "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
             }
             quotes.append(snapshot)
-            for candle in (result.get("historical") or [])[-300:]:
+            for candle in sorted(
+                (b for b in (result.get("historical") or []) if isinstance(b, dict) and b.get("date")),
+                key=lambda b: str(b["date"]),
+            )[-300:]:
                 if not isinstance(candle, dict) or not candle.get("date"):
                     continue
                 when = str(candle["date"])[:10]
