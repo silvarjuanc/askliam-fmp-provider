@@ -5,8 +5,9 @@ import hashlib
 import json
 import math
 import os
-import sqlite3
-import time
+import hmac
+import re
+from datetime import timedelta
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,89 +20,99 @@ from pydantic import BaseModel, Field
 VERSION = "V6.5.1"
 ROOT = "https://financialmodelingprep.com"
 CAP = 240
-DATA_DIR = Path(os.environ.get("ASKLIAM_DATA_DIR", str(Path.home() / ".askliam" / "v6.5.1")))
-DB = DATA_DIR / "fmp_quota_v6_5_1.sqlite3"
-TTL = {"quote": 900, "profile": 604800, "historical": 86400}
 
+# Render Free has no durable local filesystem. Upstash is authoritative.
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^][A-Z0-9^._:/-]{0,39}$")
+ROOT = os.environ.get("FMP_BASE_URL", ROOT).rstrip("/")
+# Never allow environment configuration to raise this cap.
+CAP = 240
+RESERVE_LUA = """
+local quota, blocked = KEYS[1], KEYS[2]
+if redis.call('EXISTS', blocked) == 1 then return -1 end
+if tonumber(redis.call('GET', quota) or '0') >= tonumber(ARGV[1]) then return -1 end
+local n = redis.call('INCR', quota)
+if n == 1 then redis.call('EXPIREAT', quota, tonumber(ARGV[2])) end
+return n
+"""
+BLOCK_LUA = "redis.call('SET', KEYS[1], ARGV[1], 'EXAT', ARGV[2]); return 1"
 
-def now_utc() -> str:
-    return datetime.now(timezone.utc).isoformat()
+def next_utc_midnight():
+    from datetime import timedelta
+    day = datetime.now(timezone.utc).date() + timedelta(days=1)
+    return int(datetime(day.year, day.month, day.day, tzinfo=timezone.utc).timestamp())
 
+class StorageError(Exception):
+    pass
 
-def day_utc() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+class RedisState:
+    def __init__(self, client):
+        self.client = client
+        self.url = os.environ.get("UPSTASH_REDIS_REST_URL", "").rstrip("/")
+        self.token = os.environ.get("UPSTASH_REDIS_REST_TOKEN", "")
+        if not self.url.startswith("https://") or not self.token:
+            raise StorageError("UPSTASH_NOT_CONFIGURED")
 
-
-def db_conn():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB, timeout=30, isolation_level=None)
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=FULL")
-    return conn
-
-
-def init_db():
-    with db_conn() as c:
-        c.execute("CREATE TABLE IF NOT EXISTS quota(day TEXT PRIMARY KEY, used INTEGER NOT NULL, blocked INTEGER NOT NULL DEFAULT 0, reason TEXT)")
-        c.execute("CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, payload TEXT NOT NULL, source TEXT NOT NULL, fetched INTEGER NOT NULL, expires INTEGER NOT NULL)")
-
-
-def quota_state():
-    with db_conn() as c:
-        row = c.execute("SELECT used,blocked,reason FROM quota WHERE day=?", (day_utc(),)).fetchone()
-    used, blocked, reason = row if row else (0, 0, None)
-    return {"utc_date": day_utc(), "used": used, "remaining": max(0, CAP - used), "blocked": bool(blocked or used >= CAP), "reason": reason}
-
-
-def reserve() -> bool:
-    # Atomic across independent processes sharing the SAME persistent SQLite volume.
-    with db_conn() as c:
-        c.execute("BEGIN IMMEDIATE")
+    async def call(self, *args):
         try:
-            day = day_utc()
-            c.execute("INSERT OR IGNORE INTO quota(day,used,blocked) VALUES (?,0,0)", (day,))
-            used, blocked = c.execute("SELECT used,blocked FROM quota WHERE day=?", (day,)).fetchone()
-            if blocked or used >= CAP:
-                c.execute("COMMIT")
-                return False
-            c.execute("UPDATE quota SET used=used+1 WHERE day=?", (day,))
-            c.execute("COMMIT")
-            return True
-        except BaseException:
-            c.execute("ROLLBACK")
-            raise
+            response = await self.client.post(
+                self.url,
+                json=list(args),
+                headers={"Authorization": "Bearer " + self.token},
+                timeout=15,
+            )
+            response.raise_for_status()
+            value = response.json()
+            if value.get("error"):
+                raise StorageError("UPSTASH_COMMAND_ERROR")
+            return value.get("result")
+        except (httpx.HTTPError, ValueError, TypeError):
+            raise StorageError("UPSTASH_UNAVAILABLE") from None
 
+    async def eval(self, script, keys, args):
+        return await self.call("EVAL", script, len(keys), *keys, *args)
 
-def block_day(reason: str):
-    with db_conn() as c:
-        c.execute("BEGIN IMMEDIATE")
+    async def cache_get(self, key):
+        raw = await self.call("GET", key)
+        if raw is None:
+            return None
         try:
-            c.execute("INSERT INTO quota(day,used,blocked,reason) VALUES (?,0,1,?) ON CONFLICT(day) DO UPDATE SET blocked=1,reason=excluded.reason", (day_utc(), reason))
-            c.execute("COMMIT")
-        except BaseException:
-            c.execute("ROLLBACK")
-            raise
+            return json.loads(raw)
+        except (ValueError, TypeError):
+            raise StorageError("CACHE_CORRUPT") from None
 
+    async def cache_put(self, key, payload, ttl):
+        await self.call("SET", key, json.dumps(payload, separators=(",", ":"), allow_nan=False), "EX", ttl)
 
-def key_for(kind: str, symbol: str) -> str:
-    # No API key in cache key, URL, logs or response.
-    return hashlib.sha256(f"{VERSION}:{kind}:{symbol}".encode()).hexdigest()
+    async def reserve(self):
+        day = day_utc()
+        result = await self.eval(RESERVE_LUA, [
+            "askliam:v651:fmp:used:" + day,
+            "askliam:v651:fmp:blocked:" + day,
+        ], [CAP, next_utc_midnight()])
+        return isinstance(result, int) and result > 0
 
+    async def block(self, reason, day):
+        from datetime import timedelta
+        end = datetime.fromisoformat(day).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        await self.eval(BLOCK_LUA, ["askliam:v651:fmp:blocked:" + day], [reason, int(end.timestamp())])
 
-def cache_get(kind: str, symbol: str):
-    with db_conn() as c:
-        row = c.execute("SELECT payload,source,fetched,expires FROM cache WHERE key=? AND expires>?", (key_for(kind, symbol), int(time.time()))).fetchone()
-    if not row:
-        return None
-    return {"data": json.loads(row[0]), "source": row[1], "data_timestamp": datetime.fromtimestamp(row[2], timezone.utc).isoformat(), "expires_at": datetime.fromtimestamp(row[3], timezone.utc).isoformat(), "cache_hit": True}
+    async def quota(self):
+        day = day_utc()
+        used, block = await asyncio.gather(
+            self.call("GET", "askliam:v651:fmp:used:" + day),
+            self.call("GET", "askliam:v651:fmp:blocked:" + day),
+        )
+        count = int(used or 0)
+        return {"utc_date": day, "used": count, "remaining": max(0, CAP - count), "blocked": bool(block or count >= CAP), "reason": block}
 
+    async def cursor(self):
+        return await self.call("GET", "askliam:v651:continuation_cursor")
 
-def cache_put(kind: str, symbol: str, payload: Any):
-    ts = int(time.time())
-    with db_conn() as c:
-        c.execute("INSERT INTO cache(key,payload,source,fetched,expires) VALUES (?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload,source=excluded.source,fetched=excluded.fetched,expires=excluded.expires", (key_for(kind, symbol), json.dumps(payload, allow_nan=False), "FMP", ts, ts + TTL[kind]))
+    async def set_cursor(self, value):
+        await self.call("SET", "askliam:v651:continuation_cursor", value)
 
+def key_for(kind: str, symbols: str) -> str:
+    return "askliam:v651:fmp:cache:" + hashlib.sha256(f"{VERSION}:{kind}:{symbols}".encode()).hexdigest()
 
 def finite(x):
     try:
@@ -147,60 +158,82 @@ class Query(BaseModel):
     historical_budget: int = Field(default=0, ge=0, le=240)
 
 
+
 class Provider:
     def __init__(self):
         self.client: httpx.AsyncClient | None = None
+        self.state: RedisState | None = None
         self.semaphore = asyncio.Semaphore(4)
         self.lock = asyncio.Lock()
         self.inflight: dict[str, asyncio.Task] = {}
         self.cache_hits = 0
         self.network_calls = 0
+        self.local_blocked_days: set[str] = set()
 
     async def start(self):
-        self.client = httpx.AsyncClient(base_url=ROOT, http2=True, timeout=20, limits=httpx.Limits(max_connections=8, max_keepalive_connections=4), follow_redirects=False)
+        self.client = httpx.AsyncClient(http2=True, timeout=20, limits=httpx.Limits(max_connections=10, max_keepalive_connections=5), follow_redirects=False)
+        try:
+            self.state = RedisState(self.client)
+        except StorageError:
+            self.state = None
 
     async def stop(self):
         if self.client:
             await self.client.aclose()
 
-    async def get(self, kind: Literal["quote", "profile", "historical"], symbol: str):
-        symbol = symbol.upper().strip()
-        cached = cache_get(kind, symbol)
-        if cached is not None:
+    async def get(self, kind: Literal["quote", "profile", "historical"], symbols: str):
+        if not self.state:
+            return {"status": "PROVIDER_DEFERRED", "error": "PERSISTENT_STATE_UNAVAILABLE"}
+        key = key_for(kind, symbols)
+        try:
+            cache = await self.state.cache_get(key)
+        except StorageError:
+            return {"status": "PROVIDER_DEFERRED", "error": "REDIS_UNAVAILABLE"}
+        if cache is not None:
             self.cache_hits += 1
-            return {"status": "READY", **cached}
+            return {"status": "READY", "cache_hit": True, **cache}
         if not os.environ.get("FMP_API_KEY"):
             return {"status": "PROVIDER_DEFERRED", "error": "MISSING_FMP_API_KEY"}
-        k = key_for(kind, symbol)
         async with self.lock:
-            task = self.inflight.get(k)
+            task = self.inflight.get(key)
             if task is None:
-                task = asyncio.create_task(self._network(kind, symbol))
-                self.inflight[k] = task
+                task = asyncio.create_task(self._network(kind, symbols, key))
+                self.inflight[key] = task
         try:
             return await asyncio.shield(task)
         finally:
             if task.done():
                 async with self.lock:
-                    if self.inflight.get(k) is task:
-                        self.inflight.pop(k, None)
+                    if self.inflight.get(key) is task:
+                        self.inflight.pop(key, None)
 
-    async def _network(self, kind, symbol):
+    async def _network(self, kind, symbols, key):
         async with self.semaphore:
-            cached = cache_get(kind, symbol)
-            if cached is not None:
-                self.cache_hits += 1
-                return {"status": "READY", **cached}
-            if quota_state()["blocked"] or not reserve():
+            if not self.state or day_utc() in self.local_blocked_days:
+                return {"status": "PROVIDER_DEFERRED", "error": "PROVIDER_BLOCKED"}
+            try:
+                cache = await self.state.cache_get(key)
+                if cache is not None:
+                    self.cache_hits += 1
+                    return {"status": "READY", "cache_hit": True, **cache}
+                reservation_day = day_utc()
+                permitted = await self.state.reserve()  # Atomic, BEFORE network.
+            except StorageError:
+                return {"status": "PROVIDER_DEFERRED", "error": "REDIS_RESERVATION_FAILED"}
+            if not permitted:
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_QUOTA_EXHAUSTED"}
             self.network_calls += 1
-            path = {"quote": "/api/v3/quote/", "profile": "/api/v3/profile/", "historical": "/api/v3/historical-price-full/"}[kind] + symbol
+            path = {"quote": "/api/v3/quote/", "profile": "/api/v3/profile/", "historical": "/api/v3/historical-price-full/"}[kind] + symbols
             try:
-                response = await self.client.get(path, params={"apikey": os.environ["FMP_API_KEY"]})
+                response = await self.client.get(ROOT + path, params={"apikey": os.environ.get("FMP_API_KEY")})
             except httpx.RequestError:
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_NETWORK_ERROR"}
             if response.status_code == 429:
-                block_day("HTTP_429")
+                self.local_blocked_days.add(reservation_day)
+                try:
+                    await self.state.block("HTTP_429", reservation_day)
+                except StorageError:
+                    pass  # Redis outage still causes quota reservation to fail closed.
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_HTTP_429"}
             if response.status_code >= 400:
                 return {"status": "PROVIDER_DEFERRED", "error": f"FMP_HTTP_{response.status_code}"}
@@ -208,45 +241,72 @@ class Provider:
                 data = response.json()
             except ValueError:
                 return {"status": "PROVIDER_DEFERRED", "error": "INVALID_JSON"}
-            if isinstance(data, dict) and ("Error Message" in data or "error" in data):
-                return {"status": "PROVIDER_DEFERRED", "error": "FMP_PROVIDER_ERROR"}
-            if kind in ("quote", "profile"):
-                data = next((x for x in data if isinstance(x, dict) and str(x.get("symbol", "")).upper() == symbol), None) if isinstance(data, list) else data
-            if not data:
-                return {"status": "DATA_WAIT", "error": "EMPTY_VALID_RESPONSE"}
-            cache_put(kind, symbol, data)
-            return {"status": "READY", "data": data, "source": "FMP", "data_timestamp": now_utc(), "cache_hit": False}
+            if not data or (isinstance(data, dict) and any(x in data for x in ("Error Message", "error", "Error"))):
+                return {"status": "PROVIDER_DEFERRED", "error": "FMP_EMPTY_OR_ERROR"}
+            info = {"data": data, "source": "FMP", "data_timestamp": now_utc(),
+                    "source_url_template": ROOT + path}
+            try:
+                await self.state.cache_put(key, info, TTL[kind])
+            except StorageError:
+                return {"status": "PROVIDER_DEFERRED", "error": "REDIS_CACHE_WRITE_FAILED"}
+            return {"status": "READY", "cache_hit": False, **info}
 
     async def batch(self, query: Query):
         symbols = list(dict.fromkeys(s.strip().upper() for s in query.symbols if s.strip()))
-        # No fixed 40-symbol limit. Per-symbol fallback is used only for this
-        # account-compatible endpoint; quota is reserved before every call.
-        async def one(symbol, index):
-            q = await self.get("quote", symbol)
-            p = await self.get("profile", symbol) if query.include_profiles else None
-            h = await self.get("historical", symbol) if query.include_historical and index < query.historical_budget else None
+        if any(not SYMBOL_PATTERN.fullmatch(s) for s in symbols):
+            raise HTTPException(422, "INVALID_SYMBOL")
+        batches = [symbols[i:i + 20] for i in range(0, len(symbols), 20)]
+        quotes = await asyncio.gather(*(self.get("quote", ",".join(batch)) for batch in batches))
+        profiles = await asyncio.gather(*(self.get("profile", ",".join(batch)) for batch in batches)) if query.include_profiles else []
+        def split(results):
+            output = {}
+            for group, response in zip(batches, results):
+                if response["status"] != "READY":
+                    for name in group: output[name] = response
+                    continue
+                data = response["data"]
+                records = data if isinstance(data, list) else [data]
+                mapping = {str(x.get("symbol", "")).upper(): x for x in records if isinstance(x, dict)}
+                for name in group:
+                    output[name] = ({**response, "data": mapping[name]} if name in mapping
+                        else {"status": "PROVIDER_DEFERRED", "error": "FMP_BATCH_SYMBOL_MISSING"})
+            return output
+        qmap, pmap = split(quotes), split(profiles) if query.include_profiles else {}
+        history = {}
+        if query.include_historical and query.historical_budget:
+            selected = symbols[:query.historical_budget]
+            history = dict(zip(selected, await asyncio.gather(*(self.get("historical", symbol) for symbol in selected))))
+        rows = []
+        for symbol in symbols:
+            q, p, h = qmap.get(symbol), pmap.get(symbol), history.get(symbol)
             fields = {}
-            if q["status"] == "READY":
-                d = q["data"]
-                fields.update({"underlying_price": finite(d.get("price")), "volume": finite(d.get("volume")), "market_cap": finite(d.get("marketCap")), "currency": d.get("currency")})
+            if q and q["status"] == "READY":
+                v = q["data"]
+                fields.update({"last_price": finite(v.get("price")), "volume": finite(v.get("volume")), "market_cap": finite(v.get("marketCap"))})
             if p and p["status"] == "READY":
-                d = p["data"]
-                fields.update({"sector": d.get("sector"), "industry": d.get("industry"), "exchange": d.get("exchangeShortName"), "market_cap": fields.get("market_cap") or finite(d.get("mktCap"))})
+                v = p["data"]
+                fields.update({"sector": v.get("sector"), "industry": v.get("industry"), "currency": v.get("currency"), "exchange": v.get("exchangeShortName")})
+                if fields.get("market_cap") is None: fields["market_cap"] = finite(v.get("mktCap"))
             if h and h["status"] == "READY":
                 fields.update(technicals(h["data"]))
-            fields = {k:v for k,v in fields.items() if v is not None}
-            statuses = [x["status"] for x in (q,p,h) if x is not None]
-            status = "PROVIDER_DEFERRED" if "PROVIDER_DEFERRED" in statuses else ("DATA_WAIT" if "DATA_WAIT" in statuses else "ACQUIRED_NOT_SCORED")
-            return {"canonical_symbol": symbol, "enrichment_status": status, "fields": fields, "source": "FMP", "data_timestamp": now_utc(), "missing_fields": [], "request_errors": [x.get("error") for x in (q,p,h) if x and x.get("error")], "historical": h["data"] if h and h["status"] == "READY" else None}
-        rows = await asyncio.gather(*(one(s,i) for i,s in enumerate(symbols)))
-        return {"version": VERSION, "results": rows, "fmp_quota": quota_state(), "cache_hits_this_process": self.cache_hits, "network_calls_this_process": self.network_calls}
+            errors = [v["error"] for v in (q, p, h) if v and v.get("error")]
+            rows.append({"canonical_symbol": symbol, "enrichment_status": "PROVIDER_DEFERRED" if errors else "ACQUIRED_NOT_SCORED",
+                         "source": "FMP", "data_timestamp": now_utc(),
+                         "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h) if v and v.get("source_url_template"))),
+                         "fields": {k:v for k,v in fields.items() if v is not None}, "provider_errors": errors,
+                         "historical": h["data"] if h and h["status"] == "READY" else None})
+        try:
+            quota = await self.state.quota() if self.state else None
+        except (StorageError, ValueError):
+            quota = None
+        return {"version": VERSION, "results": rows, "fmp_quota": quota,
+                "cache_hits_this_process": self.cache_hits, "network_calls_this_process": self.network_calls}
 
 
 provider = Provider()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
     await provider.start()
     yield
     await provider.stop()
@@ -263,12 +323,33 @@ def require_token(x_askliam_token: str | None = Header(default=None)):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 @app.get("/health")
-def health():
-    return {"version": VERSION, "service": "askliam-fmp-provider", "status": "running", "fmp_configured": bool(os.environ.get("FMP_API_KEY")), "persistent_db_path": str(DB)}
+async def health():
+    return {"version": VERSION, "service": "askliam-fmp-provider",
+            "storage": "UPSTASH_REDIS_REST", "redis_configured": provider.state is not None,
+            "fmp_configured": bool(os.environ.get("FMP_API_KEY")),
+            "status": "CONFIGURED_NOT_VALIDATED" if provider.state else "PENDING_EXTERNAL_RUNTIME"}
 
 @app.get("/quota", dependencies=[Depends(require_token)])
-def quota():
-    return {"version": VERSION, **quota_state()}
+async def quota():
+    if not provider.state: raise HTTPException(503, "REDIS_NOT_CONFIGURED")
+    try: return {"version": VERSION, **(await provider.state.quota())}
+    except (StorageError, ValueError): raise HTTPException(503, "REDIS_UNAVAILABLE") from None
+
+@app.get("/cursor", dependencies=[Depends(require_token)])
+async def get_cursor():
+    if not provider.state: raise HTTPException(503, "REDIS_NOT_CONFIGURED")
+    try: return {"version": VERSION, "continuation_cursor": await provider.state.cursor()}
+    except StorageError: raise HTTPException(503, "REDIS_UNAVAILABLE") from None
+
+class Cursor(BaseModel):
+    value: str = Field(min_length=1, max_length=250)
+
+@app.put("/cursor", dependencies=[Depends(require_token)])
+async def set_cursor(payload: Cursor):
+    if not provider.state: raise HTTPException(503, "REDIS_NOT_CONFIGURED")
+    try: await provider.state.set_cursor(payload.value)
+    except StorageError: raise HTTPException(503, "REDIS_UNAVAILABLE") from None
+    return {"version": VERSION, "cursor_persisted": True}
 
 @app.post("/enrich", dependencies=[Depends(require_token)])
 async def enrich(query: Query):
