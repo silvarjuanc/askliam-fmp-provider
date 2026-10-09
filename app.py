@@ -394,3 +394,45 @@ async def set_cursor(payload: Cursor):
 @app.post("/enrich", dependencies=[Depends(require_token)])
 async def enrich(query: Query):
     return await provider.batch(query)
+
+
+# Stage 0 is explicitly invoked and NEVER runs on a timer or on /health.
+# The service token authenticates callers, while Google Service Account
+# credentials separately authenticate all workbook reads and writes.
+class Stage0RunRequest(BaseModel):
+    max_symbols: int = Field(default=8, ge=1, le=159)
+    historical_budget: int = Field(default=8, ge=0, le=159)
+
+@app.post("/stage0/run", dependencies=[Depends(require_token)])
+async def stage0_run(request: Stage0RunRequest):
+    if os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() != "true":
+        raise HTTPException(503, "STAGE0_DISABLED")
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
+        raise HTTPException(503, "STAGE0_GOOGLE_CREDENTIALS_NOT_CONFIGURED")
+
+    def do_run():
+        from stage0_ingestor import Stage0_Daily_Ingestor
+        from stage0_fmp_adapter import ExistingFMPStage0Adapter
+        ingestor = Stage0_Daily_Ingestor(
+            providers={"fmp": lambda: adapter()},
+        )
+        # Authenticate workbook independently of FMP provider.
+        _, book = (None, ingestor._open())
+        adapter = ExistingFMPStage0Adapter(
+            book,
+            ingestor.run_id,
+            max_symbols=request.max_symbols,
+            historical_budget=min(request.historical_budget, request.max_symbols),
+        )
+        return ingestor.run()
+
+    from stage0_ingestor import Stage0Error
+    try:
+        return await asyncio.to_thread(do_run)
+    except Stage0Error as exc:
+        raise HTTPException(
+            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "CONCURRENT_MODIFICATION") else 503,
+            {"stage0_status": exc.status, "reason": exc.detail, "ranking_permitted": False},
+        ) from None
+    except Exception:
+        raise HTTPException(503, {"stage0_status": "HALTED", "ranking_permitted": False}) from None
