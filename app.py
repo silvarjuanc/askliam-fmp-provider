@@ -436,3 +436,41 @@ async def stage0_run(request: Stage0RunRequest):
         ) from None
     except Exception:
         raise HTTPException(503, {"stage0_status": "HALTED", "ranking_permitted": False}) from None
+
+
+@app.get("/stage0/check", dependencies=[Depends(require_token)])
+async def stage0_check():
+    """Authenticated, read-only Stage 0 Google Sheets access diagnostic."""
+    configured = {
+        "google_credentials_present": bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")),
+        "spreadsheet_id_present": bool(os.environ.get("ASKLIAM_SPREADSHEET_ID")),
+        "ingestion_enabled": os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() == "true",
+    }
+    if not configured["google_credentials_present"] or not configured["spreadsheet_id_present"]:
+        return {"version": VERSION, "status": "NOT_CONFIGURED", **configured}
+    def verify():
+        from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
+        from stage0_ingestor import TABS
+        # No providers are called; this endpoint performs no writes.
+        probe = Stage0_Daily_Ingestor(providers={"read_only": lambda: {}})
+        captured = probe._capture(probe._open())
+        return {
+            "version": VERSION,
+            "status": "PASS",
+            **configured,
+            "tabs": {name: {"readable": True, "rows": len(captured[name]["rows"])}
+                     for name in TABS},
+        }
+    from stage0_ingestor import Stage0Error
+    try:
+        return await asyncio.to_thread(verify)
+    except Stage0Error as exc:
+        raise HTTPException(503, {
+            "version": VERSION, "status": "CHECK_FAILED",
+            "code": exc.status, "reason": exc.detail,
+        }) from None
+    except Exception as exc:
+        raise HTTPException(503, {
+            "version": VERSION, "status": "CHECK_FAILED",
+            "code": type(exc).__name__,
+        }) from None
