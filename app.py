@@ -120,7 +120,7 @@ class RedisState:
         await self.call("SET", "askliam:v651:continuation_cursor", value)
 
 def key_for(kind: str, symbols: str) -> str:
-    return "askliam:v651:fmp:cache:" + hashlib.sha256(f"{VERSION}:{kind}:{symbols}".encode()).hexdigest()
+    return "askliam:v651:fmp:cache:" + hashlib.sha256(f"{VERSION}:stable:{kind}:{symbols}".encode()).hexdigest()
 
 def finite(x):
     try:
@@ -131,7 +131,7 @@ def finite(x):
 
 
 def technicals(data: Any):
-    bars = data.get("historical", []) if isinstance(data, dict) else []
+    bars = data if isinstance(data, list) else (data.get("historical", []) if isinstance(data, dict) else [])
     bars = sorted((b for b in bars if isinstance(b, dict) and b.get("date") and finite(b.get("close")) is not None and finite(b.get("close")) > 0), key=lambda b: b["date"])
     closes = [float(b["close"]) for b in bars]
     if not closes:
@@ -231,9 +231,19 @@ class Provider:
             if not permitted:
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_QUOTA_EXHAUSTED"}
             self.network_calls += 1
-            path = {"quote": "/api/v3/quote/", "profile": "/api/v3/profile/", "historical": "/api/v3/historical-price-full/"}[kind] + symbols
+            if kind == "quote":
+                endpoint = "/stable/batch-quote" if "," in symbols else "/stable/quote"
+                query_params = {"symbols" if "," in symbols else "symbol": symbols}
+            elif kind == "profile":
+                endpoint = "/stable/profile"
+                query_params = {"symbol": symbols}
+            else:
+                endpoint = "/stable/historical-price-eod/full"
+                query_params = {"symbol": symbols}
+            safe_params = dict(query_params)
+            query_params["apikey"] = os.environ.get("FMP_API_KEY")
             try:
-                response = await self.client.get(ROOT + path, params={"apikey": os.environ.get("FMP_API_KEY")})
+                response = await self.client.get(ROOT + endpoint, params=query_params)
             except httpx.RequestError:
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_NETWORK_ERROR"}
             if response.status_code == 429:
@@ -244,7 +254,7 @@ class Provider:
                     pass  # Redis outage still causes quota reservation to fail closed.
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_HTTP_429"}
             if response.status_code >= 400:
-                return {"status": "PROVIDER_DEFERRED", "error": f"FMP_HTTP_{response.status_code}"}
+                return {"status": "PROVIDER_DEFERRED", "error": "FMP_HTTP_403_KEY_OR_PLAN" if response.status_code == 403 else f"FMP_HTTP_{response.status_code}"}
             try:
                 data = response.json()
             except ValueError:
@@ -252,7 +262,7 @@ class Provider:
             if not data or (isinstance(data, dict) and any(x in data for x in ("Error Message", "error", "Error"))):
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_EMPTY_OR_ERROR"}
             info = {"data": data, "source": "FMP", "data_timestamp": now_utc(),
-                    "source_url_template": ROOT + path}
+                    "source_url_template": ROOT + endpoint + "?" + "&".join(f"{k}={v}" for k, v in safe_params.items())}
             try:
                 await self.state.cache_put(key, info, TTL[kind])
             except StorageError:
@@ -265,7 +275,7 @@ class Provider:
             raise HTTPException(422, "INVALID_SYMBOL")
         batches = [symbols[i:i + 20] for i in range(0, len(symbols), 20)]
         quotes = await asyncio.gather(*(self.get("quote", ",".join(batch)) for batch in batches))
-        profiles = await asyncio.gather(*(self.get("profile", ",".join(batch)) for batch in batches)) if query.include_profiles else []
+        profiles = await asyncio.gather(*(self.get("profile", symbol) for symbol in symbols)) if query.include_profiles else []
         def split(results):
             output = {}
             for group, response in zip(batches, results):
@@ -279,7 +289,8 @@ class Provider:
                     output[name] = ({**response, "data": mapping[name]} if name in mapping
                         else {"status": "PROVIDER_DEFERRED", "error": "FMP_BATCH_SYMBOL_MISSING"})
             return output
-        qmap, pmap = split(quotes), split(profiles) if query.include_profiles else {}
+        qmap = split(quotes)
+        pmap = {symbol: response for symbol, response in zip(symbols, profiles)} if query.include_profiles else {}
         history = {}
         if query.include_historical and query.historical_budget:
             selected = symbols[:query.historical_budget]
