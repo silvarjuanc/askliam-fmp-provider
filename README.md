@@ -32,3 +32,56 @@ Python HTTP/2 FMP adapter for **Render Free** with **Upstash Redis REST** as the
 2. Authorized `GET /quota`: should show the persistent ledger.
 3. Use a **small** authorized `POST /enrich` with 1–2 symbols to verify plan access and quota increment.
 4. Repeat the request while TTL is valid to verify a cache hit consumes 0 requests.
+
+
+## Stage 0 — Google Sheets persistence (V6.5.1)
+
+The new `stage0_ingestor.py` implements authenticated, sparse UPSERT (changed
+cells only; append new composite keys only) and a **separate authenticated
+read-back** of exactly these three written tabs:
+
+- `Raw_OHLCV`: `canonical_symbol + trading_date + source`
+- `Market_Data_Snapshot`: `ranking_run_id + canonical_symbol`
+- `FMP_Runtime_State`: `Setting`
+
+Only these three tabs are modified. `Universe` and existing snapshots are
+read-only inputs to the FMP adapter. No `.clear()`, full-sheet replacement,
+automatic fake rollback, or alteration to the FMP provider's internals.
+
+The protected `POST /stage0/run` endpoint is **disabled by default**.
+To enable, set these Render environment variables (secret values only in
+Render, **not** in GitHub or chat):
+
+```text
+ASKLIAM_SPREADSHEET_ID=13mIMIafc3AYSRBMApCKjpMKq5DIQFZhXEs7ooxSepsw
+GOOGLE_SERVICE_ACCOUNT_JSON=<service-account JSON or base64(JSON)>
+ASKLIAM_STAGE0_ENABLED=true
+```
+
+The service account's `client_email` must be shared as an **Editor** on the
+master workbook. Never paste the private key into chat, README or logs.
+Existing `ASKLIAM_SERVICE_TOKEN` protects invocation. `ASKLIAM_PROVIDER_URL`
+is optional and defaults to this Render service's HTTPS URL.
+
+Small smoke run (requires configured credentials and a completed deployment):
+
+```powershell
+$payload = @{max_symbols=1; historical_budget=1} | ConvertTo-Json
+Invoke-RestMethod -Method Post `
+    -Uri "https://askliam-fmp-provider.onrender.com/stage0/run" `
+    -Headers $headers -ContentType "application/json" -Body $payload
+```
+
+The endpoint responds `COMMITTED`/`PASS` only if all three sheets match
+the calculated target after independent read-back. Do not run Ranking unless
+both gates pass. `PARTIAL_COMMIT_UNVERIFIED` or `VERIFICATION_FAILED`
+require reconciliation: the Google Sheets API does not offer cross-tab
+atomic rollback.
+
+**Current scope:** A deliberately bounded, equity-focused FMP adapter. Other
+providers can be injected as DataFrame-returning callables without modifying
+their implementation. The canonical macro/model-scoring transformations,
+159-asset breadth across asset classes, distributed locking, and the
+verified continuation-cursor handshake must be completed before enabling a
+full daily production run. This route does **not** trigger Ranking, Trades,
+Lifecycle or a Run_Manifest commit.
