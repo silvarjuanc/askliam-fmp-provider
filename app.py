@@ -302,13 +302,34 @@ class Provider:
             if q and q["status"] == "READY":
                 v = q["data"]
                 fields.update({"last_price": finite(v.get("price")), "volume": finite(v.get("volume")), "market_cap": finite(v.get("marketCap"))})
+            errors_profile = None
             if p and p["status"] == "READY":
-                v = p["data"]
-                fields.update({"sector": v.get("sector"), "industry": v.get("industry"), "currency": v.get("currency"), "exchange": v.get("exchangeShortName")})
-                if fields.get("market_cap") is None: fields["market_cap"] = finite(v.get("mktCap"))
+                raw_profile = p["data"]
+                # FMP Stable /profile returns a list even for a single symbol.
+                # Select only the matching asset and never assume a dict.
+                profiles = raw_profile if isinstance(raw_profile, list) else [raw_profile]
+                v = next(
+                    (item for item in profiles
+                     if isinstance(item, dict)
+                     and str(item.get("symbol", "")).upper() == symbol),
+                    None,
+                )
+                if v is None:
+                    errors_profile = "FMP_PROFILE_SYMBOL_MISSING"
+                else:
+                    fields.update({
+                        "sector": v.get("sector"),
+                        "industry": v.get("industry"),
+                        "currency": v.get("currency"),
+                        "exchange": v.get("exchangeShortName"),
+                    })
+                    if fields.get("market_cap") is None:
+                        fields["market_cap"] = finite(v.get("marketCap") or v.get("mktCap"))
             if h and h["status"] == "READY":
                 fields.update(technicals(h["data"]))
             errors = [v["error"] for v in (q, p, h) if v and v.get("error")]
+            if p and p["status"] == "READY" and errors_profile:
+                errors.append(errors_profile)
             rows.append({"canonical_symbol": symbol, "enrichment_status": "PROVIDER_DEFERRED" if errors else "ACQUIRED_NOT_SCORED",
                          "source": "FMP", "data_timestamp": now_utc(),
                          "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h) if v and v.get("source_url_template"))),
