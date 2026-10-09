@@ -85,19 +85,42 @@ class Stage0_Daily_Ingestor:
     def _credentials(self) -> Credentials:
         raw = os.getenv(self.credentials_env)
         if not raw:
-            raise Stage0Error("AUTHENTICATION_FAILED", "Service account secret is not configured")
+            raise Stage0Error("AUTHENTICATION_FAILED", "MISSING_CREDENTIAL_ENV")
         try:
+            info = json.loads(raw)
+        except json.JSONDecodeError:
             try:
-                info = json.loads(raw)
+                info = json.loads(base64.b64decode(raw.strip(), validate=True).decode("utf-8"))
+            except Exception:
+                raise Stage0Error("AUTHENTICATION_FAILED", "INVALID_JSON_OR_BASE64") from None
+
+        # Render environment editors sometimes serialize the JSON object as
+        # a JSON string. Unwrap once, never evaluate arbitrary input.
+        if isinstance(info, str):
+            try:
+                info = json.loads(info)
             except json.JSONDecodeError:
-                info = json.loads(base64.b64decode(raw, validate=True).decode())
-            if not isinstance(info, dict) or info.get("type") != "service_account":
-                raise ValueError("Not a service account")
+                raise Stage0Error("AUTHENTICATION_FAILED", "WRAPPED_JSON_INVALID") from None
+
+        if not isinstance(info, dict) or info.get("type") != "service_account":
+            raise Stage0Error("AUTHENTICATION_FAILED", "NOT_SERVICE_ACCOUNT_JSON")
+        if not all(info.get(k) for k in ("private_key", "client_email", "token_uri")):
+            raise Stage0Error("AUTHENTICATION_FAILED", "MISSING_SERVICE_ACCOUNT_FIELDS")
+
+        # Accept escaped newlines if double-escaped by Render value entry.
+        key = info["private_key"]
+        if isinstance(key, str) and "\\n" in key and "\n" not in key:
+            info = dict(info)
+            info["private_key"] = key.replace("\\n", "\n")
+
+        try:
             return Credentials.from_service_account_info(
                 info, scopes=["https://www.googleapis.com/auth/spreadsheets"]
             )
+        except (ValueError, TypeError):
+            raise Stage0Error("AUTHENTICATION_FAILED", "PRIVATE_KEY_OR_SERVICE_ACCOUNT_FORMAT_INVALID") from None
         except Exception:
-            raise Stage0Error("AUTHENTICATION_FAILED", "Service account secret is invalid") from None
+            raise Stage0Error("AUTHENTICATION_FAILED", "SERVICE_ACCOUNT_INITIALIZATION_FAILED") from None
 
     def _open(self):
         # Called separately for initial capture, before-commit guard and read-back.
