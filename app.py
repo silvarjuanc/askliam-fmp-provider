@@ -21,6 +21,14 @@ VERSION = "V6.5.1"
 ROOT = "https://financialmodelingprep.com"
 CAP = 240
 
+TTL = {"quote": 900, "profile": 604800, "historical": 86400}
+
+def now_utc() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def day_utc() -> str:
+    return datetime.now(timezone.utc).date().isoformat()
+
 # Render Free has no durable local filesystem. Upstash is authoritative.
 SYMBOL_PATTERN = re.compile(r"^[A-Z0-9^][A-Z0-9^._:/-]{0,39}$")
 ROOT = os.environ.get("FMP_BASE_URL", ROOT).rstrip("/")
