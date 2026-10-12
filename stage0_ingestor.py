@@ -216,7 +216,18 @@ class Stage0_Daily_Ingestor:
             try:
                 data = provider()
             except Exception as exc:
-                raise Stage0Error("PROVIDER_DEFERRED", f"{provider_name}: {type(exc).__name__}") from None
+                # Only expose enumerated non-secret diagnostic codes.
+                allowed = {
+                    "FMP_ACQUISITION_INCOMPLETE", "FMP_QUOTES_MISSING",
+                    "FMP_HISTORICAL_EMPTY", "NO_ASSET_DATA_OBTAINED",
+                    "NO_SUPPORTED_FMP_UNIVERSE_ASSETS",
+                    "REQUESTED_SYMBOL_NOT_IN_ELIGIBLE_FMP_UNIVERSE",
+                    "PROVIDER_RESPONSE_CONTRACT_INVALID",
+                    "PROVIDER_AUTH_OR_TLS_NOT_CONFIGURED",
+                }
+                reason = str(exc)
+                code = reason if isinstance(exc, RuntimeError) and reason in allowed else type(exc).__name__
+                raise Stage0Error("PROVIDER_DEFERRED", f"{provider_name}: {code}") from None
             if not isinstance(data, Mapping):
                 raise Stage0Error("VALIDATION_FAILED", f"{provider_name}: not a mapping")
             if set(data) - set(TABS):
