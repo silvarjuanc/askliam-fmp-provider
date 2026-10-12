@@ -131,7 +131,8 @@ class FrameConversionTests(unittest.TestCase):
             "data_timestamp","analysis_price_source","last_price",
             "return_1m","return_3m","volatility_20d","funding_rate",
             "open_interest","mandatory_broad_pass","broad_readiness",
-            "missing_mandatory_fields","source_summary","enrichment_status",
+            "data_completeness_pct","missing_mandatory_fields",
+            "missing_optional_fields","source_summary","enrichment_status",
             "notes",
         ]
         headers_state=["Setting","Configured Value"]
