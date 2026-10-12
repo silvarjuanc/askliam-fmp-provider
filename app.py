@@ -464,6 +464,68 @@ async def stage0_run(request: Stage0RunRequest):
             except Exception:
                 pass
 
+@app.get("/stage0/daily/plan", dependencies=[Depends(require_token)])
+async def stage0_daily_plan():
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_daily import read_universe, plan_from_universe
+    from stage0_ingestor import Stage0Error
+    try:
+        status = await Stage0BatchCoordinator(provider.state).status()
+        universe = await asyncio.to_thread(read_universe)
+        return plan_from_universe(universe, status)
+    except Stage0Error as exc:
+        raise HTTPException(503, {"stage0_status": exc.status, "reason": exc.detail}) from None
+    except Exception:
+        raise HTTPException(503, "DAILY_PLAN_UNAVAILABLE") from None
+
+@app.post("/stage0/daily/step", dependencies=[Depends(require_token)])
+async def stage0_daily_step():
+    if os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() != "true":
+        raise HTTPException(503, "STAGE0_DISABLED")
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_daily import read_universe, plan_from_universe
+    from stage0_ingestor import Stage0Error
+    batch = Stage0BatchCoordinator(provider.state)
+    token = None
+    try:
+        token = await batch.acquire()
+        status = await batch.status()
+        if status["pending_reconciliation"]:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Unresolved journal")
+        universe = await asyncio.to_thread(read_universe)
+        plan = plan_from_universe(universe, status)
+        if not plan["next_symbols"]:
+            return {"version": VERSION, "status": "FMP_QUEUE_EMPTY", "daily_plan": plan, "ranking_permitted": False}
+        symbol = plan["next_symbols"][0]
+        day, run_id, previous = await batch.prepare([symbol], token)
+        try:
+            result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id)
+        except Stage0Error as exc:
+            if exc.status == "PROVIDER_DEFERRED":
+                await batch.mark_deferred_prewrite([symbol], exc.detail, token)
+                return {"version": VERSION, "status": "PROVIDER_DEFERRED",
+                        "symbol": symbol, "reason": exc.detail,
+                        "checkpoint_advanced": False, "ranking_permitted": False}
+            raise
+        result = await batch.finish(day, run_id, previous, [symbol], result, token)
+        result["daily_symbol"] = symbol
+        return result
+    except Stage0Error as exc:
+        raise HTTPException(
+            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "RECONCILIATION_REQUIRED") else 503,
+            {"stage0_status": exc.status, "reason": exc.detail,
+             "checkpoint_advanced": False, "ranking_permitted": False},
+        ) from None
+    except Exception:
+        raise HTTPException(503, {"stage0_status": "HALTED",
+                                  "checkpoint_advanced": False, "ranking_permitted": False}) from None
+    finally:
+        if token is not None:
+            try:
+                await batch.release(token)
+            except Exception:
+                pass
+
 @app.get("/stage0/check", dependencies=[Depends(require_token)])
 async def stage0_check():
     """Authenticated, read-only Stage 0 Google Sheets access diagnostic."""
