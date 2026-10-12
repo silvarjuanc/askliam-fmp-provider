@@ -121,7 +121,19 @@ async def inspect_abandoned_prewrite(redis, *, footprint_reader=None,
             )
         else:
             footprint = await asyncio.to_thread(footprint_reader, symbols, run_id)
+        if set(footprint) != set(symbols):
+            blockers.append("INCOMPLETE_SHEET_FOOTPRINT")
         for symbol, counts in footprint.items():
+            if symbol not in symbols:
+                blockers.append("UNEXPECTED_FOOTPRINT_SYMBOL")
+                continue
+            if not isinstance(counts, dict):
+                blockers.append("MALFORMED_FOOTPRINT")
+                continue
+            if any(not isinstance(counts.get(field), int) or counts[field] < 0
+                   for field in ("raw_history_any_run", "snapshot_matching_pending_run")):
+                blockers.append("MALFORMED_FOOTPRINT_COUNTS")
+                continue
             if counts["raw_history_any_run"]:
                 blockers.append("RAW_ROWS_PRESENT_" + symbol)
             if counts["snapshot_matching_pending_run"]:
