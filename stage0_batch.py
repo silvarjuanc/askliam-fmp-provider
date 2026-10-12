@@ -73,7 +73,51 @@ class Stage0BatchCoordinator:
             },
             "pending_reconciliation": bool(pending_raw),
             "pending": json.loads(pending_raw) if pending_raw else None,
+            "deferred_today": await self.deferred_today(),
         }
+
+    async def deferred_today(self):
+        data = await self.redis.call(
+            "HGETALL", "askliam:v651:stage0:deferred:" + utc_day()
+        )
+        if isinstance(data, list):
+            return dict(zip(data[::2], data[1::2]))
+        return data if isinstance(data, dict) else {}
+
+    async def mark_deferred_prewrite(self, symbols, reason, token):
+        # Safe ONLY for source validation errors raised before any Sheet writes.
+        # Atomically record the defer and remove this run's PREPARED journal
+        # while verifying exclusive lease ownership and matching run symbols.
+        import hashlib
+        day = utc_day()
+        stored = await self.redis.call("GET", pending_key(day))
+        if not stored:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Pending journal disappeared")
+        try:
+            journal = json.loads(stored)
+        except (ValueError, TypeError):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Pending journal unreadable") from None
+        if journal.get("symbols") != symbols:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Pending symbols changed")
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+redis.call('DEL', KEYS[2])
+return 1
+"""
+        for symbol in symbols:
+            result = await self.redis.eval(
+                script,
+                [LOCK_KEY, pending_key(day),
+                 "askliam:v651:stage0:deferred:" + day],
+                [token, stored, symbol, reason],
+            )
+            if int(result or 0) != 1:
+                raise Stage0Error(
+                    "RECONCILIATION_REQUIRED",
+                    "Could not confirm provider failure before write",
+                )
 
     async def acquire(self):
         token = secrets.token_urlsafe(32)
