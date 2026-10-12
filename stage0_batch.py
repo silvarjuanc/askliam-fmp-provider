@@ -119,6 +119,31 @@ return 1
                     "Could not confirm provider failure before write",
                 )
 
+    async def abort_prewrite(self, symbols, token):
+        """Discard a PREPARED journal only when provider acquisition failed
+        before entering the write plan, under our original exclusive lease.
+        Never invoke this for write, verification, or Redis-commit failures.
+        """
+        raw = await self.redis.call("GET", pending_key(utc_day()))
+        if not raw:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PREPARED journal missing")
+        try:
+            saved = json.loads(raw)
+        except (ValueError, TypeError):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PREPARED journal invalid") from None
+        if saved.get("status") != "PREPARED" or saved.get("symbols") != symbols:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PREPARED journal mismatch")
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+return redis.call('DEL', KEYS[2])
+"""
+        confirmed = await self.redis.eval(
+            script, [LOCK_KEY, pending_key(utc_day())], [token, raw],
+        )
+        if int(confirmed or 0) != 1:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Failed to release prewrite journal")
+
     async def acquire(self):
         token = secrets.token_urlsafe(32)
         result = await self.redis.call(
