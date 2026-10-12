@@ -29,6 +29,19 @@ def provider_failure_code(errors):
     return next(iter(codes)) if len(codes) == 1 else "FMP_ACQUISITION_INCOMPLETE"
 
 
+# Only these codes can cross the provider/ingestor boundary.
+KNOWN_SOURCE_CODES = {
+    "NO_ASSET_DATA_OBTAINED", "FMP_ACQUISITION_INCOMPLETE",
+    "FMP_QUOTES_MISSING", "FMP_HISTORICAL_EMPTY",
+    "PROVIDER_RESPONSE_CONTRACT_INVALID",
+    "REQUESTED_SYMBOL_NOT_IN_ELIGIBLE_FMP_UNIVERSE",
+    "NO_SUPPORTED_FMP_UNIVERSE_ASSETS",
+    "PROVIDER_AUTH_OR_TLS_NOT_CONFIGURED",
+    "FMP_SYMBOL_NOT_FOUND", "FMP_PROVIDER_ERROR",
+    *(f"FMP_HTTP_{n}" for n in (400,401,402,403,404,408,429,500,502,503,504)),
+}
+
+
 class ExistingFMPStage0Adapter:
     def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8, symbols=None):
         self.spreadsheet = spreadsheet
@@ -42,6 +55,27 @@ class ExistingFMPStage0Adapter:
             raise RuntimeError("PROVIDER_AUTH_OR_TLS_NOT_CONFIGURED")
 
     def __call__(self):
+        self.phase = "UNIVERSE"
+        try:
+            return self._acquire()
+        except httpx.TimeoutException:
+            raise RuntimeError("FMP_PROVIDER_TIMEOUT") from None
+        except httpx.RequestError:
+            raise RuntimeError("FMP_PROVIDER_TRANSPORT_ERROR") from None
+        except httpx.HTTPStatusError as exc:
+            code = exc.response.status_code
+            if code in (400, 401, 403, 404, 408, 409, 429, 500, 502, 503, 504):
+                raise RuntimeError(f"FMP_INTERNAL_HTTP_{code}") from None
+            raise RuntimeError("FMP_INTERNAL_HTTP_ERROR") from None
+        except RuntimeError as exc:
+            if str(exc) in KNOWN_SOURCE_CODES:
+                raise
+            raise RuntimeError(f"ADAPTER_{self.phase}_RUNTIME_ERROR") from None
+        except Exception:
+            raise RuntimeError(f"ADAPTER_{self.phase}_UNEXPECTED_ERROR") from None
+
+    def _acquire(self):
+        self.phase = "UNIVERSE"
         raw = self.spreadsheet.worksheet("Universe").get_all_records(numericise_ignore=["all"])
         priority = []
         for item in raw:
@@ -55,6 +89,7 @@ class ExistingFMPStage0Adapter:
 
         # Stage 0 queue; existing workbook SNAPSHOT is the source of previous
         # provider-deferred state. Prioritize deferred/missing before other assets.
+        self.phase = "SNAPSHOT"
         snapshots = self.spreadsheet.worksheet("Market_Data_Snapshot").get_all_records(numericise_ignore=["all"])
         deferred = {
             str(row.get("canonical_symbol", "")).upper()
@@ -79,6 +114,7 @@ class ExistingFMPStage0Adapter:
         # an unchanged black box, once per symbol, caching handled upstream.
         records = []
         quota = {}
+        self.phase = "PROVIDER_REQUEST"
         with httpx.Client(timeout=90) as http:
             for index, symbol in enumerate(symbols):
                 response = http.post(
@@ -92,7 +128,9 @@ class ExistingFMPStage0Adapter:
                     },
                 )
                 response.raise_for_status()
+                self.phase = "PROVIDER_DECODE"
                 output = response.json()
+                self.phase = "PROVIDER_REQUEST"
                 result_rows = output.get("results", [])
                 if (
                     output.get("version") != "V6.5.1"
@@ -104,6 +142,7 @@ class ExistingFMPStage0Adapter:
                 quota = output.get("fmp_quota") or quota
         if len(records) != len(symbols):
             raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
+        self.phase = "TRANSFORM"
         quotes = []
         bars = []
         failed = []
