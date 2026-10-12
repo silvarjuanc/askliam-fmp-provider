@@ -42,7 +42,8 @@ def state_key(day):
 
 
 def pending_key(day):
-    return "askliam:v651:stage0:pending:" + day
+    # One global unresolved journal blocks runs across UTC day boundaries.
+    return "askliam:v651:stage0:pending"
 
 
 def safe_cursor(previous, symbols):
@@ -97,6 +98,12 @@ class Stage0BatchCoordinator:
                 "RECONCILIATION_REQUIRED",
                 "Unverified previous batch exists; no new writes allowed",
             )
+        completed = set(state["checkpoint"].get("completed_symbols") or [])
+        if any(symbol in completed for symbol in symbols):
+            raise Stage0Error(
+                "ALREADY_VERIFIED_TODAY",
+                "At least one symbol already has a verified daily checkpoint",
+            )
         quota = state["quota"]
         if quota["blocked"] or quota["remaining"] < max(MIN_QUOTA_RESERVE, 3 * len(symbols)):
             raise Stage0Error("FMP_QUOTA_GUARD", "Quota reserve breached, wait for UTC reset")
@@ -112,7 +119,7 @@ class Stage0BatchCoordinator:
         }
         pending_written = await self.redis.call(
             "SET", pending_key(day),
-            json.dumps(journal, separators=(",", ":")), "NX", "EX", 86400,
+            json.dumps(journal, separators=(",", ":")), "NX",
         )
         if str(pending_written).upper() != "OK":
             raise Stage0Error("RECONCILIATION_REQUIRED", "Another pending journal exists")
