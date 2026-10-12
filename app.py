@@ -464,6 +464,52 @@ async def stage0_run(request: Stage0RunRequest):
             except Exception:
                 pass
 
+class Stage0DiagnosticRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+
+@app.post("/stage0/daily/diagnose", dependencies=[Depends(require_token)])
+async def stage0_daily_diagnose(request: Stage0DiagnosticRequest):
+    """Read-only workbook adapter diagnostic; FMP network quota may be used."""
+    symbol = request.symbol.strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise HTTPException(422, "INVALID_SYMBOL")
+    from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
+    from stage0_fmp_adapter import ExistingFMPStage0Adapter
+    if not provider.state:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        quota_status = await provider.state.quota()
+        if quota_status["blocked"] or quota_status["remaining"] < 40:
+            raise HTTPException(503, "FMP_QUOTA_GUARD")
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+
+    def probe():
+        diagnostic = Stage0_Daily_Ingestor(providers={"probe": lambda: {}})
+        book = diagnostic._open()
+        adapter = ExistingFMPStage0Adapter(
+            book, diagnostic.run_id,
+            symbols=[symbol], max_symbols=1, historical_budget=1,
+        )
+        try:
+            frames = adapter()
+        except RuntimeError as exc:
+            import re
+            message = str(exc)
+            code = message if re.fullmatch(r"[A-Z][A-Z0-9_]{2,90}", message) else "ADAPTER_UNEXPECTED_ERROR"
+            return {"version": VERSION, "symbol": symbol, "status": "NOT_ACQUIRED",
+                    "diagnostic_code": code, "wrote_sheets": False}
+        return {"version": VERSION, "symbol": symbol, "status": "ACQUIRED_READ_ONLY",
+                "quotes": len(frames["Market_Data_Snapshot"]),
+                "historical_rows": len(frames["Raw_OHLCV"]),
+                "wrote_sheets": False}
+    try:
+        return await asyncio.to_thread(probe)
+    except Stage0Error as exc:
+        raise HTTPException(503, {"status": exc.status, "detail": exc.detail}) from None
+    except Exception:
+        raise HTTPException(503, "DIAGNOSTIC_UNAVAILABLE") from None
+
 @app.get("/stage0/daily/plan", dependencies=[Depends(require_token)])
 async def stage0_daily_plan():
     from stage0_batch import Stage0BatchCoordinator
