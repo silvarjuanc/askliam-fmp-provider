@@ -510,6 +510,75 @@ async def stage0_daily_diagnose(request: Stage0DiagnosticRequest):
     except Exception:
         raise HTTPException(503, "DIAGNOSTIC_UNAVAILABLE") from None
 
+def _safe_domain_error(value):
+    """Reduce upstream failures to known identifiers, never raw provider text."""
+    code = str(value or "").upper()
+    known = {
+        "FMP_HTTP_400", "FMP_HTTP_401", "FMP_HTTP_402",
+        "FMP_HTTP_403_KEY_OR_PLAN", "FMP_HTTP_404",
+        "FMP_HTTP_408", "FMP_HTTP_429", "FMP_HTTP_500",
+        "FMP_HTTP_502", "FMP_HTTP_503", "FMP_HTTP_504",
+        "FMP_QUOTA_EXHAUSTED", "FMP_NETWORK_ERROR",
+        "FMP_EMPTY_OR_ERROR", "INVALID_JSON",
+        "PROVIDER_BLOCKED", "PERSISTENT_STATE_UNAVAILABLE",
+        "REDIS_UNAVAILABLE", "REDIS_RESERVATION_FAILED",
+        "REDIS_CACHE_WRITE_FAILED", "MISSING_FMP_API_KEY",
+    }
+    return code if code in known else "PROVIDER_UNKNOWN_ERROR"
+
+
+@app.post("/stage0/daily/source-check", dependencies=[Depends(require_token)])
+async def stage0_daily_source_check(request: Stage0DiagnosticRequest):
+    """FMP quote/profile/history entitlement check, no Sheet writes.
+
+    Each missing-cache domain can use a separate FMP quota reservation.
+    """
+    symbol = request.symbol.strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        raise HTTPException(422, "INVALID_SYMBOL")
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        quota_before = await provider.state.quota()
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    if quota_before["blocked"] or quota_before["remaining"] < 43:
+        raise HTTPException(503, "FMP_QUOTA_GUARD")
+    domains = {}
+    for kind in ("quote", "profile", "historical"):
+        # Separate single-symbol reads avoid the plan's batch-quote endpoint.
+        try:
+            result = await provider.get(kind, symbol)
+        except (StorageError, ValueError):
+            raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+        state = result.get("status")
+        if state == "READY":
+            domains[kind] = {
+                "status": "AVAILABLE",
+                "cache_hit": bool(result.get("cache_hit", False)),
+            }
+        else:
+            error = _safe_domain_error(result.get("error"))
+            domains[kind] = {"status": "NOT_AVAILABLE", "reason": error}
+            if error in ("FMP_HTTP_429", "FMP_QUOTA_EXHAUSTED",
+                         "REDIS_UNAVAILABLE", "REDIS_RESERVATION_FAILED",
+                         "PROVIDER_BLOCKED"):
+                break
+    try:
+        quota_after = await provider.state.quota()
+    except StorageError:
+        quota_after = None
+    return {
+        "version": VERSION, "symbol": symbol,
+        "status": "SOURCE_DOMAINS_CHECKED",
+        "domains": domains,
+        "quota": quota_after,
+        "wrote_sheets": False,
+        "checkpoint_advanced": False,
+        "ranking_permitted": False,
+    }
+
+
 @app.get("/stage0/daily/plan", dependencies=[Depends(require_token)])
 async def stage0_daily_plan():
     from stage0_batch import Stage0BatchCoordinator
