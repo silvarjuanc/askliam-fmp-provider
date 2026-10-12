@@ -272,9 +272,27 @@ class Stage0_Daily_Ingestor:
                         continue
                     previous = target[key]
                     delta = {}
+                    # Historical observations are immutable unless OHLCV
+                    # or genuinely structural source data changes. Rerunning
+                    # the ingestor must not rewrite 300 rows solely because
+                    # the run ID/fetch timestamp is new.
+                    market_columns = ("open", "high", "low", "close", "volume")
+                    unchanged_bar = (
+                        tab == "Raw_OHLCV"
+                        and all(
+                            field not in payload
+                            or payload[field] == ""
+                            or previous.get(field, "") == payload[field]
+                            for field in market_columns
+                        )
+                    )
+                    volatile_bar_columns = (
+                        {"ranking_run_id", "fetched_at_utc"}
+                        if unchanged_bar else set()
+                    )
                     for field, value in payload.items():
                         # Missing optional = unknown, never clear known values.
-                        if value == "":
+                        if value == "" or field in volatile_bar_columns:
                             continue
                         if previous.get(field, "") != value:
                             delta[field] = value
@@ -377,7 +395,7 @@ class Stage0_Daily_Ingestor:
                     }
                     for tab in TABS
                 },
-                "cursor_advance_permitted": True,
+                "cursor_advance_permitted": False,  # No verified Redis checkpoint handshake implemented yet
                 "ranking_permitted": False,  # Stage0 storage verification is not model scoring/ranking readiness
                 "acquisition_only": True,
             }
