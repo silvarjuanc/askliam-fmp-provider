@@ -719,6 +719,75 @@ async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
                 pass
 
 
+class CryptoSingleCommitRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+    confirmation: str = Field(min_length=8, max_length=100)
+
+
+@app.post("/stage0/crypto/commit-one", dependencies=[Depends(require_token)])
+async def stage0_crypto_commit_one(request: CryptoSingleCommitRequest):
+    """Explicit opt-in single-symbol Sheets commit; DISABLED BY DEFAULT.
+
+    Must enable ASKLIAM_CRYPTO_WRITE_ENABLED=true intentionally on Render.
+    No ranking, no orders, no FMP quota and no FMP checkpoint pollution.
+    Partial/uncertain Sheets writes retain the global Redis pending journal.
+    """
+    from stage0_crypto_commit import (
+        commit_one_native_perp, feature_guard,
+    )
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    symbol = request.symbol.strip().upper()
+    try:
+        feature_guard(symbol, request.confirmation)
+        if provider.state is None or provider.client is None:
+            raise HTTPException(503, "SOURCE_UNAVAILABLE")
+        universe = await read_universe_cached(provider.state)
+        candidates = {
+            row["symbol"] for row in universe
+            if row.get("route") == "CRYPTO_PROVIDER_PENDING"
+        }
+        if symbol not in candidates or symbol not in COINGECKO_IDS:
+            raise HTTPException(422, "CRYPTO_SYMBOL_NOT_ENABLED")
+        return await commit_one_native_perp(
+            symbol, request.confirmation, redis=provider.state,
+            client=provider.client,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        status = (
+            403 if exc.status in (
+                "CRYPTO_WRITE_DISABLED", "EXPLICIT_CONFIRMATION_REQUIRED"
+            ) else
+            409 if exc.status in (
+                "RECONCILIATION_REQUIRED", "CONCURRENT_RUN_BLOCKED",
+                "ALREADY_COMMITTED_TODAY", "SNAPSHOT_COLLISION",
+                "CHECKPOINT_NOT_COMMITTED"
+            ) else 503
+        )
+        raise HTTPException(
+            status, {
+                "stage0_status": exc.status,
+                "checkpoint_advanced": False,
+                "ranking_permitted": False,
+                "execution_permitted": False,
+            }
+        ) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(
+            503, {
+                "stage0_status": "CRYPTO_COMMIT_HALTED",
+                "checkpoint_advanced": False,
+                "ranking_permitted": False,
+                "execution_permitted": False,
+            }
+        ) from None
+
+
 @app.get("/stage0/crypto/sheet-dry-run", dependencies=[Depends(require_token)])
 async def stage0_crypto_sheet_dry_run(symbol: str):
     """Read-only live Hyperliquid acquisition + Google Sheets UPSERT diff.
