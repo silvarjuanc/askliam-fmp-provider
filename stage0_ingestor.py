@@ -367,7 +367,8 @@ class Stage0_Daily_Ingestor:
                     for tab in TABS
                 },
                 "cursor_advance_permitted": True,
-                "ranking_permitted": True,
+                "ranking_permitted": False,  # Stage0 storage verification is not model scoring/ranking readiness
+                "acquisition_only": True,
             }
         except Stage0Error:
             raise
