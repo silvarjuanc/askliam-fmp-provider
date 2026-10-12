@@ -85,3 +85,48 @@ their implementation. The canonical macro/model-scoring transformations,
 verified continuation-cursor handshake must be completed before enabling a
 full daily production run. This route does **not** trigger Ranking, Trades,
 Lifecycle or a Run_Manifest commit.
+
+
+## Stage0 Verified Batch Coordinator (V6.5.1)
+
+- `POST /stage0/run` now **requires explicit** 1–5 eligible symbols and a
+  historical budget exactly equal to the symbol count. The old unjournaled
+  bulk entry point was removed.
+- `GET /stage0/batch/status` (service-token authenticated) shows the Upstash
+  UTC-day checkpoint, the currently unresolved journal, and the FMP quota.
+  This is **read-only** and does not call FMP or mutate Sheets.
+- Every new batch obtains an Upstash `SET NX EX` exclusive lease, checks a
+  40-call FMP headroom reserve, and persists a single global `PREPARED`
+  journal before writing. No new batch can begin with an unresolved journal.
+- A batch uses the stable `STAGE0-YYYYMMDD-V6.5.1` snapshot run id.
+  Successful retries on another day retain historic OHLCV rows via
+  `canonical_symbol|trading_date|source` composite UPSERT.
+- Only after independently authenticated read-back of all three tabs does an
+  atomic Redis Lua script promote the verified checkpoint and release the
+  pending journal (if the lease is still held).
+- Cross-instance lease TTL = 900 s. If a write, verification, Redis, or lease
+  step fails, **the journal remains pending**; halt and manually reconcile
+  before continuing. Never infer a rollback from a 503.
+- Batches with already completed symbols on the same UTC day fail closed;
+  select only unprocessed symbols. The coordinator does not run an automatic
+  159-asset loop, place trades, or authorize Ranking.
+- `FMP_Runtime_State` contains observed in-flight/candidate metadata; durable
+  `COMMITTED_VERIFY_PASS` status lives in Upstash checkpoint and must be
+  read using `GET /stage0/batch/status`. Until finalization is implemented,
+  do not interpret the candidate row as the final checkpoint.
+- Run pure tests: `python -m unittest test_stage0_batch.py`.
+
+### Opt-in 5-symbol request (after deployment and readiness check)
+
+```json
+{
+  "symbols": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL"],
+  "max_symbols": 5,
+  "historical_budget": 5
+}
+```
+
+Requesting the same verified symbols twice in one UTC day is rejected instead
+of consuming FMP quota. To inspect state without writes, use
+`GET /stage0/batch/status`. Do not reset the Redis pending journal by hand:
+an interrupted write must first be reconciled against Google Sheets.
