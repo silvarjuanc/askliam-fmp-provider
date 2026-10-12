@@ -502,8 +502,21 @@ async def stage0_daily_step():
             result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id)
         except Stage0Error as exc:
             if exc.status == "PROVIDER_DEFERRED":
-                await batch.mark_deferred_prewrite([symbol], exc.detail, token)
-                return {"version": VERSION, "status": "PROVIDER_DEFERRED",
+                code = exc.detail.rsplit(": ", 1)[-1]
+                deferred_errors = {
+                    "FMP_HTTP_401", "FMP_HTTP_402", "FMP_HTTP_403",
+                    "FMP_HTTP_404", "FMP_SYMBOL_NOT_FOUND",
+                    "FMP_QUOTES_MISSING", "FMP_HISTORICAL_EMPTY",
+                    "FMP_ACQUISITION_INCOMPLETE", "FMP_PROVIDER_ERROR",
+                    "NO_ASSET_DATA_OBTAINED",
+                }
+                if code in deferred_errors:
+                    await batch.mark_deferred_prewrite([symbol], exc.detail, token)
+                    return {"version": VERSION, "status": "PROVIDER_DEFERRED",
+                            "symbol": symbol, "reason": exc.detail,
+                            "checkpoint_advanced": False, "ranking_permitted": False}
+                await batch.abort_prewrite([symbol], token)
+                return {"version": VERSION, "status": "SOURCE_RETRYABLE",
                         "symbol": symbol, "reason": exc.detail,
                         "checkpoint_advanced": False, "ranking_permitted": False}
             raise
