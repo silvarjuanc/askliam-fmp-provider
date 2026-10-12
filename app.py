@@ -669,6 +669,56 @@ async def stage0_daily_source_check(request: Stage0DiagnosticRequest):
     }
 
 
+class FMP402BackfillRequest(BaseModel):
+    confirmation: Literal["SEED_CONFIRMED_FMP_HTTP402_ONLY"]
+
+
+@app.post("/stage0/fmp/402/backfill-today", dependencies=[Depends(require_token)])
+async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
+    """Opt-in daily Redis-to-Redis migration. No FMP calls or Sheet writes.
+
+    Requires exact user confirmation to prevent automatic mutation of the
+    future request queue. Backfills only explicit, historical FMP_HTTP_402
+    reasons from the current UTC date.
+    """
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_ingestor import Stage0Error
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    batch = Stage0BatchCoordinator(provider.state)
+    token = None
+    try:
+        token = await batch.acquire()
+        status = await batch.status()
+        if status["pending_reconciliation"]:
+            raise Stage0Error("RECONCILIATION_REQUIRED",
+                              "Pending journal prevents FMP cooldown migration")
+        result = await batch.seed_402_from_today(token)
+        return {
+            "version": VERSION,
+            "status": "FMP_402_COOLDOWNS_SEEDED",
+            "source": "CONFIRMED_TODAY_DEFERRED_REDIS",
+            **result,
+            "sheet_writes_performed": False,
+            "fmp_requests_performed": False,
+            "checkpoint_advanced": False,
+            "ranking_permitted": False,
+        }
+    except Stage0Error as exc:
+        raise HTTPException(
+            409 if exc.status in ("RECONCILIATION_REQUIRED", "CONCURRENT_RUN_BLOCKED") else 503,
+            {"stage0_status": exc.status, "reason": exc.detail},
+        ) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    finally:
+        if token is not None:
+            try:
+                await batch.release(token)
+            except Exception:
+                pass
+
+
 @app.get("/stage0/daily/plan", dependencies=[Depends(require_token)])
 async def stage0_daily_plan():
     from stage0_batch import Stage0BatchCoordinator
