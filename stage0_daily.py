@@ -77,10 +77,13 @@ async def read_universe_cached(redis, *, reader=None):
 def plan_from_universe(entries, status, *, batch_size=1):
     completed = set(status["checkpoint"].get("completed_symbols") or [])
     deferred = set(status.get("deferred_today") or {})
+    blocked_402 = set(status.get("fmp_quote_402_cooldowns") or {})
     counters = Counter(item["route"] for item in entries)
     symbols_by_route = {route: [item["symbol"] for item in entries if item["route"] == route] for route in sorted(counters)}
     eligible = [item["symbol"] for item in entries if item["route"] == "FMP_CANDIDATE"]
-    pending = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
+    unattempted = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
+    cooldown_skipped = [symbol for symbol in unattempted if symbol in blocked_402]
+    pending = [symbol for symbol in unattempted if symbol not in blocked_402]
     return {
         "version": "V6.5.1",
         "utc_date": status["utc_date"],
@@ -91,11 +94,19 @@ def plan_from_universe(entries, status, *, batch_size=1):
         "fmp_completed_today": len(set(eligible) & completed),
         "fmp_deferred_today": len(set(eligible) & deferred),
         "fmp_remaining_today": len(pending),
+        "fmp_unattempted_today_including_cooldowns": len(unattempted),
+        "fmp_http402_cooldown_count": len(set(eligible) & blocked_402),
+        "fmp_http402_skipped_today": len(cooldown_skipped),
+        "fmp_http402_skipped_symbols": cooldown_skipped,
+        "fmp_cooldowns_expire_at_utc": {
+            sym: status["fmp_quote_402_cooldowns"][sym]
+            for sym in cooldown_skipped
+        },
         "unsupported_today": len(entries) - len(eligible),
         "next_symbols": pending[:max(1, min(batch_size, 5))],
         "quota": status["quota"],
         "pending_reconciliation": status["pending_reconciliation"],
         "ranking_permitted": False,
         "acquisition_only": True,
-        "note": "Route classification is not provider entitlement verification.",
+        "note": "FMP HTTP 402 cooldown only suppresses repeated FMP quote requests; alternatives remain eligible. Classification does not prove provider entitlement.",
     }
