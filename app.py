@@ -719,6 +719,49 @@ async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
                 pass
 
 
+@app.get("/stage0/crypto/sheet-dry-run", dependencies=[Depends(require_token)])
+async def stage0_crypto_sheet_dry_run(symbol: str):
+    """Read-only live Hyperliquid acquisition + Google Sheets UPSERT diff.
+
+    No sheets commit, no Redis journal write, no score/trade action.
+    Reject if a global pending reconciliation exists before making reads.
+    """
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_crypto_ingest_prepare import preview_native_perp_stage0
+    from stage0_crypto_sheet_preflight import read_only_sheet_preflight
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_PROBE_UNAVAILABLE")
+    symbol = str(symbol).strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol) or symbol not in COINGECKO_IDS:
+        raise HTTPException(422, "CRYPTO_SYMBOL_NOT_MAPPED")
+    try:
+        state = await Stage0BatchCoordinator(provider.state).status()
+        if state["pending_reconciliation"]:
+            raise HTTPException(409, "RECONCILIATION_REQUIRED")
+        universe = await read_universe_cached(provider.state)
+        eligible = {
+            entry["symbol"] for entry in universe
+            if entry.get("route") == "CRYPTO_PROVIDER_PENDING"
+        }
+        if symbol not in eligible:
+            raise HTTPException(422, "CRYPTO_SYMBOL_NOT_ENABLED")
+        return await preview_native_perp_stage0(
+            symbol, client=provider.client,
+            sheet_preflight=read_only_sheet_preflight,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        raise HTTPException(503, {"stage0_status": exc.status}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "CRYPTO_SHEET_DRY_RUN_UNAVAILABLE") from None
+
+
 @app.get("/stage0/crypto/ingest-preview", dependencies=[Depends(require_token)])
 async def stage0_crypto_ingest_preview(symbol: str):
     """STRICTLY READ ONLY: prove native-perp OHLCV can become Stage0 frames.
