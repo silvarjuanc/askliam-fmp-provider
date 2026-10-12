@@ -153,8 +153,15 @@ class ExistingFMPStage0Adapter:
             {"Setting": "Stage 0 Source Failures", "Configured Value": ";".join(failed)[:900], "Runtime State": "PROVIDER_ERRORS", "Version": "V6.5.1"},
             {"Setting": "Stage 0 Updated Assets", "Configured Value": str(len(quotes)), "Runtime State": "PROPOSED", "Version": "V6.5.1"},
         ]
+        # Fail closed: deferred placeholders are NOT acquired market data.
         if not quotes:
             raise RuntimeError("NO_ASSET_DATA_OBTAINED")
+        if failed:
+            raise RuntimeError("FMP_ACQUISITION_INCOMPLETE")
+        if any(q.get("last_price") is None for q in quotes):
+            raise RuntimeError("FMP_QUOTES_MISSING")
+        if self.historical_budget and not bars:
+            raise RuntimeError("FMP_HISTORICAL_EMPTY")
         return {
             "Raw_OHLCV": pd.DataFrame(bars),
             "Market_Data_Snapshot": pd.DataFrame(quotes),
