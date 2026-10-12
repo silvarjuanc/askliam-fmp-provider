@@ -400,6 +400,7 @@ async def enrich(query: Query):
 # The service token authenticates callers, while Google Service Account
 # credentials separately authenticate all workbook reads and writes.
 class Stage0RunRequest(BaseModel):
+    symbols: list[str] = Field(default_factory=list, max_length=159)
     max_symbols: int = Field(default=8, ge=1, le=159)
     historical_budget: int = Field(default=8, ge=0, le=159)
 
@@ -409,6 +410,13 @@ async def stage0_run(request: Stage0RunRequest):
         raise HTTPException(503, "STAGE0_DISABLED")
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
         raise HTTPException(503, "STAGE0_GOOGLE_CREDENTIALS_NOT_CONFIGURED")
+
+    import re
+    symbols = [s.strip().upper() for s in request.symbols]
+    if len(symbols) != len(set(symbols)) or any(not SYMBOL_PATTERN.fullmatch(s) for s in symbols):
+        raise HTTPException(422, "INVALID_OR_DUPLICATE_STAGE0_SYMBOLS")
+    if symbols and len(symbols) > request.max_symbols:
+        raise HTTPException(422, "SYMBOL_COUNT_EXCEEDS_MAX_SYMBOLS")
 
     def do_run():
         from stage0_ingestor import Stage0_Daily_Ingestor
@@ -423,6 +431,7 @@ async def stage0_run(request: Stage0RunRequest):
             ingestor.run_id,
             max_symbols=request.max_symbols,
             historical_budget=min(request.historical_budget, request.max_symbols),
+            symbols=symbols,
         )
         return ingestor.run()
 
