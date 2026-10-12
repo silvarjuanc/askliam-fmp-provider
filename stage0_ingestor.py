@@ -224,6 +224,11 @@ class Stage0_Daily_Ingestor:
                     "REQUESTED_SYMBOL_NOT_IN_ELIGIBLE_FMP_UNIVERSE",
                     "PROVIDER_RESPONSE_CONTRACT_INVALID",
                     "PROVIDER_AUTH_OR_TLS_NOT_CONFIGURED",
+                    "FMP_SYMBOL_NOT_FOUND", "FMP_PROVIDER_ERROR",
+                    "FMP_HTTP_400", "FMP_HTTP_401", "FMP_HTTP_402",
+                    "FMP_HTTP_403", "FMP_HTTP_404", "FMP_HTTP_408",
+                    "FMP_HTTP_429", "FMP_HTTP_500", "FMP_HTTP_502",
+                    "FMP_HTTP_503", "FMP_HTTP_504",
                 }
                 reason = str(exc)
                 code = reason if isinstance(exc, RuntimeError) and reason in allowed else type(exc).__name__
