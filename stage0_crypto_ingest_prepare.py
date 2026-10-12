@@ -99,9 +99,7 @@ def frames_from_native_perp(
             "provider_symbol": symbol,
             "asset_class": "Crypto",
             "source": SOURCE,
-            "source_url_template": (
-                SOURCE_URL + "?type=candleSnapshot&coin=" + symbol + "&interval=1d"
-            ),
+            "source_url_template": SOURCE_URL,
             "trading_date": day,
             "open": positive_finite(candle["o"]),
             "high": positive_finite(candle["h"]),
@@ -112,7 +110,11 @@ def frames_from_native_perp(
             "fetched_at_utc": fetched,
             "upsert_key": symbol + "|" + day + "|" + SOURCE,
             "quality_status": "DERIVATIVE_SOURCE_VALIDATED_NOT_SPOT",
-            "notes": "native perpetual OHLCV; base-asset volume, not USD/spot",
+            "notes": (
+                "POST type=candleSnapshot coin=" + symbol
+                + " interval=1d; native perpetual OHLCV; "
+                "base-asset volume, not USD/spot"
+            ),
         })
     raw_rows.sort(key=lambda item: item["trading_date"])
     if len(raw_rows) != n_complete or len({
