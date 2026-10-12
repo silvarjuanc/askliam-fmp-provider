@@ -38,8 +38,12 @@ COMMIT_LUA = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
 local current = redis.call('GET', KEYS[3])
-if current ~= ARGV[3] then return 0 end
-redis.call('SET', KEYS[3], ARGV[4])
+if ARGV[3] == '1' then
+    if current ~= ARGV[4] then return 0 end
+else
+    if current then return 0 end
+end
+redis.call('SET', KEYS[3], ARGV[5])
 redis.call('DEL', KEYS[2])
 return 1
 """
@@ -234,11 +238,9 @@ async def commit_one_native_perp(
         result_code = await redis.eval(
             COMMIT_LUA,
             [LOCK_KEY, pending_key(day), crypto_checkpoint_key(day)],
-            [token, journal_raw, stored if stored else "",
-             next_checkpoint],
+            [token, journal_raw, "1" if stored else "0",
+             stored or "", next_checkpoint],
         )
-        # Redis missing keys return nil, not empty string; a new day's
-        # checkpoint needs a separately explicit missing-key comparison.
         if int(result_code or 0) != 1:
             raise Stage0Error(
                 "CHECKPOINT_NOT_COMMITTED", "Redis CAS failed; manual reconciliation"
