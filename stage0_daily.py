@@ -47,6 +47,7 @@ def plan_from_universe(entries, status, *, batch_size=1):
     completed = set(status["checkpoint"].get("completed_symbols") or [])
     deferred = set(status.get("deferred_today") or {})
     counters = Counter(item["route"] for item in entries)
+    symbols_by_route = {route: [item["symbol"] for item in entries if item["route"] == route] for route in sorted(counters)}
     eligible = [item["symbol"] for item in entries if item["route"] == "FMP_CANDIDATE"]
     pending = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
     return {
@@ -54,6 +55,7 @@ def plan_from_universe(entries, status, *, batch_size=1):
         "utc_date": status["utc_date"],
         "universe_enabled_count": len(entries),
         "by_provider_route": dict(sorted(counters.items())),
+        "symbols_by_route": symbols_by_route,
         "fmp_candidate_count": len(eligible),
         "fmp_completed_today": len(set(eligible) & completed),
         "fmp_deferred_today": len(set(eligible) & deferred),
