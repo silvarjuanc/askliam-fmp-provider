@@ -17,7 +17,7 @@ def provider_failure_code(errors):
     codes = set()
     for value in errors:
         raw = str(value).upper()
-        match = re.search(r"FMP_HTTP_(400|401|402|403|404|408|429|500|502|503|504)\\b", raw)
+        match = re.search(r"FMP_HTTP_(400|401|402|403|404|408|429|500|502|503|504)", raw)
         if match:
             codes.add("FMP_HTTP_" + match.group(1))
         elif "FMP_BATCH_SYMBOL_MISSING" in raw or "FMP_PROFILE_SYMBOL_MISSING" in raw:
