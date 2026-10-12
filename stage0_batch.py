@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 
 from stage0_fmp_adapter import ExistingFMPStage0Adapter
 from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
+from stage0_fmp_cooldown import (FMP_402_KEY, FMP_402_REASON, COOLDOWN_HASH_TTL_SECONDS,
+                                active_cooldowns, cooldown_expiry)
 
 LOCK_KEY = "askliam:v651:stage0:exclusive"
 LOCK_SECONDS = 900
@@ -74,6 +76,7 @@ class Stage0BatchCoordinator:
             "pending_reconciliation": bool(pending_raw),
             "pending": json.loads(pending_raw) if pending_raw else None,
             "deferred_today": await self.deferred_today(),
+            "fmp_quote_402_cooldowns": await self.fmp_402_cooldowns(),
         }
 
     async def deferred_today(self):
@@ -83,6 +86,62 @@ class Stage0BatchCoordinator:
         if isinstance(data, list):
             return dict(zip(data[::2], data[1::2]))
         return data if isinstance(data, dict) else {}
+
+    async def fmp_402_cooldowns(self):
+        """Persist FMP quote entitlements across UTC day rollover (7d fields)."""
+        data = await self.redis.call("HGETALL", FMP_402_KEY)
+        try:
+            return active_cooldowns(data)
+        except (TypeError, ValueError, OverflowError):
+            raise Stage0Error("STORAGE_UNAVAILABLE", "INVALID_FMP_COOLDOWN_LEDGER") from None
+
+    async def seed_402_from_today(self, token):
+        """Explicit one-time migration of today's confirmed FMP 402 entries.
+
+        Requires an active exclusive lease. Cannot write market worksheets,
+        checkpoints, or the global pending journal. Entries with generic
+        error codes are never guessed to be FMP_HTTP_402.
+        """
+        day = utc_day()
+        records = await self.deferred_today()
+        targets = sorted(symbol for symbol, reason in records.items()
+                         if reason == FMP_402_REASON)
+        if not targets:
+            return {"eligible_today": 0, "new_cooldowns": 0,
+                    "already_active": 0, "cooldown_days": 7}
+        expiry = cooldown_expiry()
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return -1 end
+if redis.call('EXISTS', KEYS[2]) ~= 0 then return -2 end
+if redis.call('HGET', KEYS[3], ARGV[2]) ~= ARGV[3] then return 0 end
+local previous = tonumber(redis.call('HGET', KEYS[4], ARGV[2]) or '0')
+if previous > tonumber(ARGV[4]) then return 2 end
+redis.call('HSET', KEYS[4], ARGV[2], ARGV[5])
+redis.call('EXPIRE', KEYS[4], tonumber(ARGV[6]))
+return 1
+"""
+        from time import time
+        epoch = int(time())
+        inserted = 0
+        already = 0
+        for symbol in targets:
+            code = await self.redis.eval(
+                script,
+                [LOCK_KEY, pending_key(day),
+                 "askliam:v651:stage0:deferred:" + day, FMP_402_KEY],
+                [token, symbol, FMP_402_REASON, epoch,
+                 expiry, COOLDOWN_HASH_TTL_SECONDS],
+            )
+            code = int(code or 0)
+            if code == 1:
+                inserted += 1
+            elif code == 2:
+                already += 1
+            else:
+                raise Stage0Error("RECONCILIATION_REQUIRED",
+                                  "Deferred history changed; cooldown seed halted")
+        return {"eligible_today": len(targets), "new_cooldowns": inserted,
+                "already_active": already, "cooldown_days": 7}
 
     async def mark_deferred_prewrite(self, symbols, reason, token):
         # Safe ONLY for source validation errors raised before any Sheet writes.
@@ -103,15 +162,20 @@ class Stage0BatchCoordinator:
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
 redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+if ARGV[4] == 'fmp: FMP_HTTP_402' then
+    redis.call('HSET', KEYS[4], ARGV[3], ARGV[5])
+    redis.call('EXPIRE', KEYS[4], tonumber(ARGV[6]))
+end
 redis.call('DEL', KEYS[2])
 return 1
 """
+        expiry = cooldown_expiry()
         for symbol in symbols:
             result = await self.redis.eval(
                 script,
                 [LOCK_KEY, pending_key(day),
-                 "askliam:v651:stage0:deferred:" + day],
-                [token, stored, symbol, reason],
+                 "askliam:v651:stage0:deferred:" + day, FMP_402_KEY],
+                [token, stored, symbol, reason, expiry, COOLDOWN_HASH_TTL_SECONDS],
             )
             if int(result or 0) != 1:
                 raise Stage0Error(
