@@ -231,7 +231,16 @@ class Stage0_Daily_Ingestor:
                     "FMP_HTTP_503", "FMP_HTTP_504",
                 }
                 reason = str(exc)
-                code = reason if isinstance(exc, RuntimeError) and reason in allowed else type(exc).__name__
+                adapter_phase_error = bool(re.fullmatch(
+                    r"ADAPTER_(UNIVERSE|SNAPSHOT|PROVIDER_REQUEST|PROVIDER_DECODE|TRANSFORM)_(RUNTIME|UNEXPECTED)_ERROR",
+                    reason,
+                ))
+                internal_http_error = bool(re.fullmatch(r"FMP_INTERNAL_HTTP_(400|401|403|404|408|409|429|500|502|503|504|ERROR)",reason))
+                safe_error = (
+                    reason in allowed or adapter_phase_error or internal_http_error
+                    or reason in ("FMP_PROVIDER_TIMEOUT", "FMP_PROVIDER_TRANSPORT_ERROR")
+                )
+                code = reason if isinstance(exc, RuntimeError) and safe_error else type(exc).__name__
                 raise Stage0Error("PROVIDER_DEFERRED", f"{provider_name}: {code}") from None
             if not isinstance(data, Mapping):
                 raise Stage0Error("VALIDATION_FAILED", f"{provider_name}: not a mapping")
