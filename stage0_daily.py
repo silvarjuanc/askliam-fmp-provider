@@ -5,6 +5,7 @@ conservative candidate list; unsupported models need their own live adapters.
 """
 from __future__ import annotations
 from collections import Counter
+import json
 from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
 
 ELIGIBLE_FMP_CLASSES = {"equity", "index", "fixed income etf", "index / etf / basket"}
@@ -42,6 +43,36 @@ def read_universe():
         entries.append({"symbol": symbol, "asset_class": asset_class,
                         "route": classify(asset_class)})
     return sorted(entries, key=lambda item: item["symbol"])
+
+UNIVERSE_CACHE_KEY = "askliam:v651:stage0:daily_universe"
+UNIVERSE_CACHE_TTL_SECONDS = 300
+
+async def read_universe_cached(redis, *, reader=None):
+    """Reduce Google Sheets reads during step loops; strict five-minute TTL."""
+    import asyncio
+    if reader is None:
+        reader = read_universe
+    cached = await redis.call("GET", UNIVERSE_CACHE_KEY)
+    if cached:
+        try:
+            data = json.loads(cached)
+            if isinstance(data, list) and data and all(
+                isinstance(item, dict)
+                and isinstance(item.get("symbol"), str)
+                and isinstance(item.get("route"), str)
+                for item in data
+            ):
+                return data
+        except (ValueError, TypeError):
+            pass
+    entries = await asyncio.to_thread(reader)
+    if not entries:
+        raise Stage0Error("SCHEMA_FAILED", "Enabled Universe unexpectedly empty")
+    await redis.call(
+        "SET", UNIVERSE_CACHE_KEY, json.dumps(entries, separators=(",", ":")),
+        "EX", UNIVERSE_CACHE_TTL_SECONDS,
+    )
+    return entries
 
 def plan_from_universe(entries, status, *, batch_size=1):
     completed = set(status["checkpoint"].get("completed_symbols") or [])
