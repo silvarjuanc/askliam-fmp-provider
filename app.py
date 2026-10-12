@@ -400,9 +400,21 @@ async def enrich(query: Query):
 # The service token authenticates callers, while Google Service Account
 # credentials separately authenticate all workbook reads and writes.
 class Stage0RunRequest(BaseModel):
-    symbols: list[str] = Field(default_factory=list, max_length=159)
-    max_symbols: int = Field(default=8, ge=1, le=159)
-    historical_budget: int = Field(default=8, ge=0, le=159)
+    # Explicit symbols only: unsupervised full-universe scans are not enabled.
+    symbols: list[str] = Field(min_length=1, max_length=5)
+    max_symbols: int = Field(default=5, ge=1, le=5)
+    historical_budget: int = Field(default=5, ge=0, le=5)
+
+@app.get("/stage0/batch/status", dependencies=[Depends(require_token)])
+async def stage0_batch_status():
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_ingestor import Stage0Error
+    try:
+        return await Stage0BatchCoordinator(provider.state).status()
+    except Stage0Error as exc:
+        raise HTTPException(503, {"status": exc.status, "detail": exc.detail}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
 
 @app.post("/stage0/run", dependencies=[Depends(require_token)])
 async def stage0_run(request: Stage0RunRequest):
@@ -410,42 +422,47 @@ async def stage0_run(request: Stage0RunRequest):
         raise HTTPException(503, "STAGE0_DISABLED")
     if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
         raise HTTPException(503, "STAGE0_GOOGLE_CREDENTIALS_NOT_CONFIGURED")
-
-    import re
     symbols = [s.strip().upper() for s in request.symbols]
-    if len(symbols) != len(set(symbols)) or any(not SYMBOL_PATTERN.fullmatch(s) for s in symbols):
-        raise HTTPException(422, "INVALID_OR_DUPLICATE_STAGE0_SYMBOLS")
-    if symbols and len(symbols) > request.max_symbols:
-        raise HTTPException(422, "SYMBOL_COUNT_EXCEEDS_MAX_SYMBOLS")
-
-    def do_run():
-        from stage0_ingestor import Stage0_Daily_Ingestor
-        from stage0_fmp_adapter import ExistingFMPStage0Adapter
-        ingestor = Stage0_Daily_Ingestor(
-            providers={"fmp": lambda: adapter()},
-        )
-        # Authenticate workbook independently of FMP provider.
-        _, book = (None, ingestor._open())
-        adapter = ExistingFMPStage0Adapter(
-            book,
-            ingestor.run_id,
-            max_symbols=request.max_symbols,
-            historical_budget=min(request.historical_budget, request.max_symbols),
-            symbols=symbols,
-        )
-        return ingestor.run()
-
+    if (
+        len(symbols) > request.max_symbols
+        or request.historical_budget != len(symbols)
+        or len(symbols) != len(set(symbols))
+        or any(not SYMBOL_PATTERN.fullmatch(s) for s in symbols)
+    ):
+        raise HTTPException(422, "STAGE0_REQUIRES_EXPLICIT_VALID_SYMBOLS_WITH_HISTORICAL")
+    from stage0_batch import Stage0BatchCoordinator
     from stage0_ingestor import Stage0Error
+    batch = Stage0BatchCoordinator(provider.state)
+    token = None
     try:
-        return await asyncio.to_thread(do_run)
+        token = await batch.acquire()
+        day, run_id, checkpoint = await batch.prepare(symbols, token)
+        result = await asyncio.to_thread(batch.run_blocking, symbols, run_id)
+        # No cursor promotion until Redis has acknowledged the durable
+        # checkpoint, with lock ownership checked atomically in Lua.
+        return await batch.finish(day, run_id, checkpoint, symbols, result, token)
     except Stage0Error as exc:
         raise HTTPException(
-            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "CONCURRENT_MODIFICATION") else 503,
-            {"stage0_status": exc.status, "reason": exc.detail, "ranking_permitted": False},
+            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "RECONCILIATION_REQUIRED")
+            else 503,
+            {
+                "stage0_status": exc.status, "reason": exc.detail,
+                "ranking_permitted": False,
+                "checkpoint_advanced": False,
+            },
         ) from None
     except Exception:
-        raise HTTPException(503, {"stage0_status": "HALTED", "ranking_permitted": False}) from None
-
+        raise HTTPException(
+            503,
+            {"stage0_status": "HALTED", "checkpoint_advanced": False,
+             "ranking_permitted": False},
+        ) from None
+    finally:
+        if token is not None:
+            try:
+                await batch.release(token)
+            except Exception:
+                pass
 
 @app.get("/stage0/check", dependencies=[Depends(require_token)])
 async def stage0_check():
