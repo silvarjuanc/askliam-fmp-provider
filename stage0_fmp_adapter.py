@@ -12,10 +12,11 @@ import pandas as pd
 
 
 class ExistingFMPStage0Adapter:
-    def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8):
+    def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8, symbols=None):
         self.spreadsheet = spreadsheet
         self.run_id = run_id
         self.max_symbols = max(1, min(int(max_symbols), 159))
+        self.requested_symbols = [str(x).strip().upper() for x in (symbols or [])]
         self.historical_budget = max(0, min(int(historical_budget), self.max_symbols))
         self.base_url = os.getenv("ASKLIAM_PROVIDER_URL", "https://askliam-fmp-provider.onrender.com").rstrip("/")
         self.token = os.getenv("ASKLIAM_SERVICE_TOKEN", "")
@@ -44,7 +45,13 @@ class ExistingFMPStage0Adapter:
             or str(row.get("mandatory_broad_pass", "")).upper() in ("FALSE", "0")
         }
         priority.sort(key=lambda pair: (pair[0] not in deferred, pair[0]))
-        selected = priority[:self.max_symbols]
+        if self.requested_symbols:
+            known = {sym: item for sym, item in priority}
+            if any(sym not in known for sym in self.requested_symbols):
+                raise RuntimeError("REQUESTED_SYMBOL_NOT_IN_ELIGIBLE_FMP_UNIVERSE")
+            selected = [(sym, known[sym]) for sym in self.requested_symbols]
+        else:
+            selected = priority[:self.max_symbols]
         if not selected:
             raise RuntimeError("NO_SUPPORTED_FMP_UNIVERSE_ASSETS")
         symbols = [symbol for symbol, _ in selected]
