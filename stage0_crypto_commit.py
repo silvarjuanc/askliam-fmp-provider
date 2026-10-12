@@ -67,6 +67,20 @@ def feature_guard(symbol: str, confirmation: str):
         raise Stage0Error(
             "EXPLICIT_CONFIRMATION_REQUIRED", "Symbol-scoped confirmation missing"
         )
+    allowed_symbol = os.getenv("ASKLIAM_CRYPTO_WRITE_SYMBOL", "").strip().upper()
+    allowed_day = os.getenv("ASKLIAM_CRYPTO_WRITE_UTC_DAY", "").strip()
+    if not allowed_symbol or not allowed_day:
+        raise Stage0Error(
+            "CRYPTO_WRITE_SCOPE_MISSING", "BTC-only UTC-day scope not configured"
+        )
+    if symbol != allowed_symbol:
+        raise Stage0Error(
+            "CRYPTO_WRITE_SCOPE_DENIED", "The requested crypto symbol is not authorized"
+        )
+    if datetime.now(timezone.utc).date().isoformat() != allowed_day:
+        raise Stage0Error(
+            "CRYPTO_WRITE_DAY_EXPIRED", "Single-day write permission has expired"
+        )
 
 
 async def acquire_native_perp_frames(
