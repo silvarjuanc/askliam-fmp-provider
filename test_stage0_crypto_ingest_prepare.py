@@ -80,6 +80,10 @@ class FrameConversionTests(unittest.TestCase):
         self.assertAlmostEqual(row["funding_rate"], 0.00001)
         self.assertEqual(row["open_interest"], 500)
         self.assertIn("momentum_score", row["missing_mandatory_fields"])
+        self.assertIn("return_1d", row["missing_optional_fields"])
+        self.assertAlmostEqual(row["data_completeness_pct"], 22.22, places=2)
+        self.assertIn("https://api.hyperliquid.xyz/info", row["source_summary"])
+        self.assertIn("Completeness = 2/9 mandatory CRYPTO_V1 fields", row["notes"])
         self.assertFalse(report["independent_spot_acquired"])
 
     def test_gap_in_candles_blocks_frame_entirely(self):
