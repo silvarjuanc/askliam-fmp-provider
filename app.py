@@ -467,11 +467,11 @@ async def stage0_run(request: Stage0RunRequest):
 @app.get("/stage0/daily/plan", dependencies=[Depends(require_token)])
 async def stage0_daily_plan():
     from stage0_batch import Stage0BatchCoordinator
-    from stage0_daily import read_universe, plan_from_universe
+    from stage0_daily import read_universe_cached, plan_from_universe
     from stage0_ingestor import Stage0Error
     try:
         status = await Stage0BatchCoordinator(provider.state).status()
-        universe = await asyncio.to_thread(read_universe)
+        universe = await read_universe_cached(provider.state)
         return plan_from_universe(universe, status)
     except Stage0Error as exc:
         raise HTTPException(503, {"stage0_status": exc.status, "reason": exc.detail}) from None
@@ -483,7 +483,7 @@ async def stage0_daily_step():
     if os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() != "true":
         raise HTTPException(503, "STAGE0_DISABLED")
     from stage0_batch import Stage0BatchCoordinator
-    from stage0_daily import read_universe, plan_from_universe
+    from stage0_daily import read_universe_cached, plan_from_universe
     from stage0_ingestor import Stage0Error
     batch = Stage0BatchCoordinator(provider.state)
     token = None
@@ -492,7 +492,7 @@ async def stage0_daily_step():
         status = await batch.status()
         if status["pending_reconciliation"]:
             raise Stage0Error("RECONCILIATION_REQUIRED", "Unresolved journal")
-        universe = await asyncio.to_thread(read_universe)
+        universe = await read_universe_cached(provider.state)
         plan = plan_from_universe(universe, status)
         if not plan["next_symbols"]:
             return {"version": VERSION, "status": "FMP_QUEUE_EMPTY", "daily_plan": plan, "ranking_permitted": False}
