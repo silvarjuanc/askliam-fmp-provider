@@ -405,6 +405,96 @@ class Stage0RunRequest(BaseModel):
     max_symbols: int = Field(default=5, ge=1, le=5)
     historical_budget: int = Field(default=5, ge=0, le=5)
 
+@app.get("/stage0/reconciliation/inspect", dependencies=[Depends(require_token)])
+async def stage0_reconciliation_inspect():
+    """Independent read-only Redis/Sheets audit; never clears pending journal."""
+    from stage0_reconcile import inspect_abandoned_prewrite, public_inspection
+    from stage0_ingestor import Stage0Error
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        result = await inspect_abandoned_prewrite(provider.state)
+        return public_inspection(result)
+    except Stage0Error as exc:
+        raise HTTPException(503, {"status": exc.status, "reason": exc.detail}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "RECONCILIATION_INSPECTION_UNAVAILABLE") from None
+
+
+class Stage0PrewriteRecoveryRequest(BaseModel):
+    symbol: str = Field(min_length=1, max_length=40)
+    run_id: str = Field(min_length=10, max_length=100)
+    confirmation: Literal["ABORT_PREWRITE_ONLY_NO_SHEET_ROWS"]
+
+
+@app.post("/stage0/reconciliation/abort-prewrite", dependencies=[Depends(require_token)])
+async def stage0_reconciliation_abort_prewrite(request: Stage0PrewriteRecoveryRequest):
+    """Explicit and guarded Redis journal recovery; no Sheet modifications.
+
+    PREPARED is not sufficient: verify no symbol footprint across sheets,
+    expiry of old lease, preserved checkpoint, and exact Redis compare-and-del.
+    Never promote checkpoint or write market data.
+    """
+    from stage0_batch import Stage0BatchCoordinator, LOCK_KEY, pending_key, state_key
+    from stage0_reconcile import inspect_abandoned_prewrite
+    from stage0_ingestor import Stage0Error
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    if not SYMBOL_PATTERN.fullmatch(request.symbol):
+        raise HTTPException(422, "INVALID_SYMBOL")
+    batch = Stage0BatchCoordinator(provider.state)
+    token = None
+    try:
+        token = await batch.acquire()
+        report = await inspect_abandoned_prewrite(provider.state)
+        journal = report.get("pending") or {}
+        if (
+            not report["safe_to_abort_prewrite"]
+            or journal.get("symbols") != [request.symbol]
+            or journal.get("run_id") != request.run_id
+        ):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Footprint or journal validation blocked recovery")
+        raw = report["journal_raw"]
+        saved_checkpoint = report["checkpoint_raw"] or ""
+        day = journal["created_at"][:10]
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+if (redis.call('GET', KEYS[3]) or '') ~= ARGV[3] then return 0 end
+return redis.call('DEL', KEYS[2])
+"""
+        result = await provider.state.eval(
+            script,
+            [LOCK_KEY, pending_key(day), state_key(day)],
+            [token, raw, saved_checkpoint],
+        )
+        if int(result or 0) != 1:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "Concurrent Redis state change; journal preserved")
+        return {
+            "version": VERSION,
+            "status": "ABANDONED_PREWRITE_JOURNAL_ABORTED",
+            "symbol": request.symbol,
+            "run_id": request.run_id,
+            "sheet_writes_performed": False,
+            "checkpoint_advanced": False,
+            "ranking_permitted": False,
+        }
+    except Stage0Error as exc:
+        raise HTTPException(409, {"status": exc.status, "reason": exc.detail}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "RECONCILIATION_ABORT_FAILED") from None
+    finally:
+        if token is not None:
+            try:
+                await batch.release(token)
+            except Exception:
+                pass
+
+
 @app.get("/stage0/batch/status", dependencies=[Depends(require_token)])
 async def stage0_batch_status():
     from stage0_batch import Stage0BatchCoordinator
