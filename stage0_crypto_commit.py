@@ -118,10 +118,13 @@ async def acquire_native_perp_frames(
 
 class GuardedCryptoIngestor(Stage0_Daily_Ingestor):
     """Apply collision/source guards to the SAME snapshot used by UPSERT."""
-    def __init__(self, frames, symbol, run_id):
+    def __init__(self, frames, symbol, run_id, *, spreadsheet_id=None):
         self._crypto_symbol = symbol
         self._crypto_run_id = run_id
-        super().__init__(providers={"hyperliquid_native_perp": lambda: frames})
+        super().__init__(
+            providers={"hyperliquid_native_perp": lambda: frames},
+            spreadsheet_id=spreadsheet_id,
+        )
         self.run_id = run_id
 
     def _plan(self, before, frames):
