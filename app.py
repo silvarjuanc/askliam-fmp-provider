@@ -443,7 +443,7 @@ async def stage0_run(request: Stage0RunRequest):
         return await batch.finish(day, run_id, checkpoint, symbols, result, token)
     except Stage0Error as exc:
         raise HTTPException(
-            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "RECONCILIATION_REQUIRED")
+            409 if exc.status in ("CONCURRENT_RUN_BLOCKED", "RECONCILIATION_REQUIRED", "ALREADY_VERIFIED_TODAY", "INVALID_BATCH")
             else 503,
             {
                 "stage0_status": exc.status, "reason": exc.detail,
