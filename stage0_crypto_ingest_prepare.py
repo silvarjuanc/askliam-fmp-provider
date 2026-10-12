@@ -205,6 +205,7 @@ def frames_from_native_perp(
 
 async def preview_native_perp_stage0(
     symbol: str, *, client: httpx.AsyncClient, now: datetime | None = None,
+    sheet_preflight=None,
 ) -> dict:
     """Read-only remote preflight, maximum 3 Hyperliquid Info calls.
 
@@ -299,6 +300,29 @@ async def preview_native_perp_stage0(
     except (ValueError, TypeError, KeyError, OverflowError):
         return {**base, "status":"PREPARATION_BLOCKED",
                 "reason":"FRAME_VALIDATION_FAILED"}
+    if sheet_preflight is not None:
+        # The caller-provided callback is a read-only sheet capture/comparison.
+        # Keep network acquisition outside the blocking Sheets I/O thread.
+        import asyncio
+        try:
+            comparison = await asyncio.to_thread(
+                sheet_preflight, frames, report, symbol, run_id,
+            )
+        except Exception:
+            return {
+                **base,
+                "status": "SHEET_PREFLIGHT_UNAVAILABLE",
+                "reason": "READ_ONLY_SHEET_COMPARISON_FAILED",
+                "prepared": report,
+                "reader_only": True,
+            }
+        return {
+            **base,
+            "status": comparison["status"],
+            "prepared": report,
+            "sheet_comparison": comparison,
+            "reader_only": True,
+        }
     return {
         **base,
         "status": "PREPARED_PREVIEW_NO_WRITES",
