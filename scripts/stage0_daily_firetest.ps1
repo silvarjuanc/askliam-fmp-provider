@@ -56,7 +56,9 @@ try {
         $r=Invoke-RestMethod -Uri "$base/stage0/daily/step" -Headers $Headers -Method POST -ErrorAction Stop
         $outcome=''
         $reason=''
-        if($r.status -eq 'PROVIDER_DEFERRED') {
+        $responseStatus=''
+        if($null -ne $r.PSObject.Properties['status']) { $responseStatus=[string]$r.status }
+        if($responseStatus -eq 'PROVIDER_DEFERRED') {
             if([string]$r.symbol -ne $symbol -or $r.checkpoint_advanced -ne $false) {
                 throw 'Provider response inconsistent with expected symbol'
             }
@@ -66,7 +68,7 @@ try {
                  $r.checkpoint_status -eq 'COMMITTED_VERIFY_PASS' -and
                  [string]$r.daily_symbol -eq $symbol) {
             $outcome='COMMITTED_VERIFY_PASS'
-        } elseif($r.status -eq 'FMP_QUEUE_EMPTY') {
+        } elseif($responseStatus -eq 'FMP_QUEUE_EMPTY') {
             Write-Host 'FMP queue empty.'
             break
         } else {
