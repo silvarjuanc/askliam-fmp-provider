@@ -173,7 +173,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
 class WriterSafety(unittest.TestCase):
     def test_preexisting_independent_spot_snapshot_rejected(self):
         frames,report=prepare()
-        writer=GuardedCryptoIngestor(frames,"BTC",RUN)
+        writer=GuardedCryptoIngestor(frames,"BTC",RUN,spreadsheet_id="offline-only")
         before=captured_state(collision=True)
         with self.assertRaisesRegex(Stage0Error,"SNAPSHOT_COLLISION"):
             writer._plan(before,{
@@ -183,7 +183,7 @@ class WriterSafety(unittest.TestCase):
 
     def test_no_collision_allows_validated_crypto_frames(self):
         frames,report=prepare()
-        writer=GuardedCryptoIngestor(frames,"BTC",RUN)
+        writer=GuardedCryptoIngestor(frames,"BTC",RUN,spreadsheet_id="offline-only")
         before=captured_state(fmp=True)
         plans,expected=writer._plan(before,{
             "Raw_OHLCV":frames["Raw_OHLCV"],
