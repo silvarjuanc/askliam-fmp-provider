@@ -75,6 +75,7 @@ class ExistingFMPStage0Adapter:
         quotes = []
         bars = []
         failed = []
+        historical_counts = {}
         by_symbol = {str(row.get("canonical_symbol", "")).upper(): row for row in records}
         for symbol, item in selected:
             result = by_symbol.get(symbol)
@@ -126,6 +127,7 @@ class ExistingFMPStage0Adapter:
                 "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
             }
             quotes.append(snapshot)
+            historical_counts[symbol] = 0
             for candle in sorted(
                 (b for b in (result.get("historical") or []) if isinstance(b, dict) and b.get("date")),
                 key=lambda b: str(b["date"]),
@@ -152,13 +154,14 @@ class ExistingFMPStage0Adapter:
                     "notes": "",
                 }
                 bars.append(row)
+                historical_counts[symbol] += 1
         quota = output.get("fmp_quota") or {}
         settings = [
             {"Setting": "Current Quota Used", "Configured Value": str(quota.get("used", "UNKNOWN")), "Runtime State": "OBSERVED_FROM_UPSTASH", "Version": "V6.5.1"},
             {"Setting": "Current Quota Remaining", "Configured Value": str(quota.get("remaining", "UNKNOWN")), "Runtime State": "OBSERVED_FROM_UPSTASH", "Version": "V6.5.1"},
-            {"Setting": "Stage 0 Last Run ID", "Configured Value": self.run_id, "Runtime State": "PENDING_READBACK", "Version": "V6.5.1"},
-            {"Setting": "Stage 0 Source Failures", "Configured Value": ";".join(failed)[:900], "Runtime State": "PROVIDER_ERRORS", "Version": "V6.5.1"},
-            {"Setting": "Stage 0 Updated Assets", "Configured Value": str(len(quotes)), "Runtime State": "PROPOSED", "Version": "V6.5.1"},
+            {"Setting": "Stage 0 Last Run ID", "Configured Value": self.run_id, "Runtime State": "COMMIT_CANDIDATE_READBACK_REQUIRED", "Version": "V6.5.1"},
+            {"Setting": "Stage 0 Source Failures", "Configured Value": "NONE" if not failed else ";".join(failed)[:900], "Runtime State": "OBSERVED_PROVIDER_ERRORS", "Version": "V6.5.1"},
+            {"Setting": "Stage 0 Updated Assets", "Configured Value": str(len(quotes)), "Runtime State": "ACQUIRED_PENDING_READBACK", "Version": "V6.5.1"},
         ]
         # Fail closed: deferred placeholders are NOT acquired market data.
         if not quotes:
@@ -167,7 +170,7 @@ class ExistingFMPStage0Adapter:
             raise RuntimeError("FMP_ACQUISITION_INCOMPLETE")
         if any(q.get("last_price") is None for q in quotes):
             raise RuntimeError("FMP_QUOTES_MISSING")
-        if self.historical_budget and not bars:
+        if self.historical_budget and any(historical_counts.get(sym, 0) == 0 for sym in symbols[:self.historical_budget]):
             raise RuntimeError("FMP_HISTORICAL_EMPTY")
         return {
             "Raw_OHLCV": pd.DataFrame(bars),
