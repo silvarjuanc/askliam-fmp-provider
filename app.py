@@ -719,6 +719,43 @@ async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
                 pass
 
 
+@app.get("/stage0/crypto/history-probe", dependencies=[Depends(require_token)])
+async def stage0_crypto_history_probe(symbol: str):
+    """Explicit one-asset read-only Hyperliquid native perpetual history test.
+
+    No CoinGecko, no market data persistence, no analytical ranking, and no
+    execution. Futures/perpetual prices must not masquerade as spot prices.
+    """
+    from stage0_crypto_history_probe import probe_hyperliquid_history
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_PROBE_UNAVAILABLE")
+    sym = symbol.strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(sym) or sym not in COINGECKO_IDS:
+        raise HTTPException(422, "CRYPTO_SYMBOL_NOT_MAPPED")
+    try:
+        universe = await read_universe_cached(provider.state)
+        crypto_symbols = {
+            item["symbol"] for item in universe
+            if item.get("route") == "CRYPTO_PROVIDER_PENDING"
+        }
+        if sym not in crypto_symbols:
+            raise HTTPException(422, "CRYPTO_SYMBOL_NOT_ENABLED")
+        return await probe_hyperliquid_history(
+            sym, client=provider.client,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        raise HTTPException(503, {"stage0_status": exc.status}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "CRYPTO_HISTORY_PROBE_UNAVAILABLE") from None
+
+
 @app.get("/stage0/crypto/source-probe", dependencies=[Depends(require_token)])
 async def stage0_crypto_source_probe():
     """Read-only provider preview of Universe CRYPTO_V1; does not persist prices."""
