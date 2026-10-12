@@ -28,13 +28,18 @@ SOURCE = "HYPERLIQUID_NATIVE_PERP"
 SOURCE_PRICE = "HYPERLIQUID_NATIVE_PERP_REFERENCE_ONLY"
 SOURCE_URL = "https://api.hyperliquid.xyz/info"
 CRYPTO_MISSING = [
-    "last_price (independent spot)",
-    "return_1m (independent spot)",
-    "return_3m (independent spot)",
-    "volatility_20d (independent spot)",
+    "last_price",
+    "return_1m",
+    "return_3m",
+    "volatility_20d",
     "momentum_score",
     "volume_score",
     "trend_score",
+]
+CRYPTO_OPTIONAL_MISSING = [
+    "return_1d", "return_5d", "return_6m", "return_12m",
+    "drawdown_52w", "relative_strength_score", "oi_change",
+    "catalyst_score", "macro_score",
 ]
 
 
@@ -146,15 +151,23 @@ def frames_from_native_perp(
         "open_interest": oi_base,
         "mandatory_broad_pass": "FALSE",
         "broad_readiness": "INCOMPLETE_DERIVATIVE_ONLY",
+        # Coverage reports 2 nonblank mandatory fields out of the nine
+        # explicitly listed for CRYPTO_V1 in Data_Requirements. This is
+        # metadata only; it does NOT calculate or authorize model readiness.
+        "data_completeness_pct": round(100.0 * 2 / 9, 2),
         "missing_mandatory_fields": "; ".join(CRYPTO_MISSING),
+        "missing_optional_fields": "; ".join(CRYPTO_OPTIONAL_MISSING),
         "source_summary": (
-            SOURCE + " candleSnapshot 1d " + str(n_complete)
-            + " complete days; fundingHistory "
+            SOURCE_URL + " POST candleSnapshot 1d " + str(n_complete)
+            + " complete perpetual days; POST fundingHistory "
             + str(funding["funding_observations"]) + " observations"
         ),
         "enrichment_status": "ACQUIRED_PERPETUAL_NOT_SPOT",
         "notes": (
             "Native-perp price/history are NOT independent spot market data. "
+            "Completeness = 2/9 mandatory CRYPTO_V1 fields (funding_rate, "
+            "open_interest) only; optional coverage not included in this number. "
+            "Spot last_price/returns/volatility are NOT acquired. "
             "Perpetual-only reference metrics: "
             + json.dumps(summary, separators=(",", ":"), sort_keys=True)
             + ". Open interest in base asset units. "
