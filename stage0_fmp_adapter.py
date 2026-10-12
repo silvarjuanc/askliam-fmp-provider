@@ -56,21 +56,35 @@ class ExistingFMPStage0Adapter:
             raise RuntimeError("NO_SUPPORTED_FMP_UNIVERSE_ASSETS")
         symbols = [symbol for symbol, _ in selected]
         now = datetime.now(timezone.utc).isoformat()
+        # FMP Free supports single-symbol /stable/quote but can reject
+        # comma-separated symbols with HTTP 402. Call existing provider as
+        # an unchanged black box, once per symbol, caching handled upstream.
+        records = []
+        quota = {}
         with httpx.Client(timeout=90) as http:
-            response = http.post(
-                self.base_url + "/enrich",
-                headers={"X-Askliam-Token": self.token},
-                json={
-                    "symbols": symbols,
-                    "include_profiles": True,
-                    "include_historical": True,
-                    "historical_budget": self.historical_budget,
-                },
-            )
-            response.raise_for_status()
-            output = response.json()
-        records = output.get("results", [])
-        if output.get("version") != "V6.5.1" or len(records) != len(symbols):
+            for index, symbol in enumerate(symbols):
+                response = http.post(
+                    self.base_url + "/enrich",
+                    headers={"X-Askliam-Token": self.token},
+                    json={
+                        "symbols": [symbol],
+                        "include_profiles": True,
+                        "include_historical": index < self.historical_budget,
+                        "historical_budget": 1 if index < self.historical_budget else 0,
+                    },
+                )
+                response.raise_for_status()
+                output = response.json()
+                result_rows = output.get("results", [])
+                if (
+                    output.get("version") != "V6.5.1"
+                    or len(result_rows) != 1
+                    or result_rows[0].get("canonical_symbol") != symbol
+                ):
+                    raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
+                records.extend(result_rows)
+                quota = output.get("fmp_quota") or quota
+        if len(records) != len(symbols):
             raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
         quotes = []
         bars = []
@@ -155,7 +169,6 @@ class ExistingFMPStage0Adapter:
                 }
                 bars.append(row)
                 historical_counts[symbol] += 1
-        quota = output.get("fmp_quota") or {}
         settings = [
             {"Setting": "Current Quota Used", "Configured Value": str(quota.get("used", "UNKNOWN")), "Runtime State": "OBSERVED_FROM_UPSTASH", "Version": "V6.5.1"},
             {"Setting": "Current Quota Remaining", "Configured Value": str(quota.get("remaining", "UNKNOWN")), "Runtime State": "OBSERVED_FROM_UPSTASH", "Version": "V6.5.1"},
