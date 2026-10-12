@@ -719,6 +719,43 @@ async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
                 pass
 
 
+@app.get("/stage0/crypto/ingest-preview", dependencies=[Depends(require_token)])
+async def stage0_crypto_ingest_preview(symbol: str):
+    """STRICTLY READ ONLY: prove native-perp OHLCV can become Stage0 frames.
+
+    Does not call writer, Redis journal/checkpoint, score engine or broker.
+    Not equivalent to an approved transactional import.
+    """
+    from stage0_crypto_ingest_prepare import preview_native_perp_stage0
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_PROBE_UNAVAILABLE")
+    symbol = str(symbol).strip().upper()
+    if not SYMBOL_PATTERN.fullmatch(symbol) or symbol not in COINGECKO_IDS:
+        raise HTTPException(422, "CRYPTO_SYMBOL_NOT_MAPPED")
+    try:
+        universe = await read_universe_cached(provider.state)
+        crypto_symbols = {
+            item["symbol"] for item in universe
+            if item.get("route") == "CRYPTO_PROVIDER_PENDING"
+        }
+        if symbol not in crypto_symbols:
+            raise HTTPException(422, "CRYPTO_SYMBOL_NOT_ENABLED")
+        return await preview_native_perp_stage0(
+            symbol, client=provider.client,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        raise HTTPException(503, {"stage0_status": exc.status}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "CRYPTO_STAGE0_PREVIEW_UNAVAILABLE") from None
+
+
 @app.get("/stage0/crypto/history-probe", dependencies=[Depends(require_token)])
 async def stage0_crypto_history_probe(symbol: str):
     """Explicit one-asset read-only Hyperliquid native perpetual history test.
