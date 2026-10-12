@@ -31,7 +31,7 @@ class ExistingFMPStage0Adapter:
                 continue
             cls = str(item.get("Asset Class", "")).lower()
             sym = str(item.get("Symbol", "")).strip().upper()
-            if not sym or not ("equity" in cls or cls in ("etf", "index")):
+            if not sym or not (cls in ("equity", "index", "fixed income etf", "index / etf / basket", "etf")):
                 continue
             priority.append((sym, item))
 
