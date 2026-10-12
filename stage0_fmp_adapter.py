@@ -11,6 +11,24 @@ import httpx
 import pandas as pd
 
 
+def provider_failure_code(errors):
+    """Return only allowlisted non-sensitive upstream error categories."""
+    import re
+    codes = set()
+    for value in errors:
+        raw = str(value).upper()
+        match = re.search(r"FMP_HTTP_(400|401|402|403|404|408|429|500|502|503|504)\\b", raw)
+        if match:
+            codes.add("FMP_HTTP_" + match.group(1))
+        elif "FMP_BATCH_SYMBOL_MISSING" in raw or "FMP_PROFILE_SYMBOL_MISSING" in raw:
+            codes.add("FMP_SYMBOL_NOT_FOUND")
+        elif "FMP_HISTORICAL_EMPTY" in raw:
+            codes.add("FMP_HISTORICAL_EMPTY")
+        else:
+            codes.add("FMP_PROVIDER_ERROR")
+    return next(iter(codes)) if len(codes) == 1 else "FMP_ACQUISITION_INCOMPLETE"
+
+
 class ExistingFMPStage0Adapter:
     def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8, symbols=None):
         self.spreadsheet = spreadsheet
@@ -180,7 +198,7 @@ class ExistingFMPStage0Adapter:
         if not quotes:
             raise RuntimeError("NO_ASSET_DATA_OBTAINED")
         if failed:
-            raise RuntimeError("FMP_ACQUISITION_INCOMPLETE")
+            raise RuntimeError(provider_failure_code([error for row in records for error in (row.get("provider_errors") or [])]))
         if any(q.get("last_price") is None for q in quotes):
             raise RuntimeError("FMP_QUOTES_MISSING")
         if self.historical_budget and any(historical_counts.get(sym, 0) == 0 for sym in symbols[:self.historical_budget]):
