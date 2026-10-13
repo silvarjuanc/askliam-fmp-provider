@@ -719,6 +719,26 @@ async def stage0_backfill_fmp_402(request: FMP402BackfillRequest):
                 pass
 
 
+@app.get("/stage0/crypto/checkpoint", dependencies=[Depends(require_token)])
+async def stage0_crypto_checkpoint(day: str, symbol: str = "BTC"):
+    """Authenticated Redis-only read of crypto daily checkpoint; no mutation."""
+    from stage0_crypto_checkpoint_read import inspect_crypto_checkpoint
+    from stage0_ingestor import Stage0Error
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        return await inspect_crypto_checkpoint(
+            provider.state, day=day, symbol=symbol
+        )
+    except Stage0Error as exc:
+        code = 422 if exc.status in (
+            "CRYPTO_SYMBOL_NOT_MAPPED", "INVALID_DATE"
+        ) else 409
+        raise HTTPException(code, {"stage0_status": exc.status}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+
+
 class CryptoSingleCommitRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
     confirmation: str = Field(min_length=8, max_length=100)
