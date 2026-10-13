@@ -727,9 +727,15 @@ async def stage0_crypto_checkpoint(day: str, symbol: str = "BTC"):
     if provider.state is None:
         raise HTTPException(503, "UPSTASH_UNAVAILABLE")
     try:
-        return await inspect_crypto_checkpoint(
+        status = await inspect_crypto_checkpoint(
             provider.state, day=day, symbol=symbol
         )
+        # Non-secret runtime configuration, read-only: lets operators verify
+        # that the opt-in Sheets writer has actually been disabled.
+        status["crypto_write_enabled"] = (
+            os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true"
+        )
+        return status
     except Stage0Error as exc:
         code = 422 if exc.status in (
             "CRYPTO_SYMBOL_NOT_MAPPED", "INVALID_DATE"
