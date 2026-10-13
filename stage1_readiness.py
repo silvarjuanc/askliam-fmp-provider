@@ -114,6 +114,15 @@ def audit_asset(model_row, snapshot, *, expected_run_id, now):
             "completeness_pct": 0., "missing_fields": mandatory,
             "reason": "SCORE_MODEL_MISMATCH",
         }
+    # Provider/access/quota faults are not genuine analytical DATA_WAIT.
+    if "DEFERRED" in str(snapshot.get("enrichment_status", "")).upper():
+        return {
+            "model": model,
+            "status": "PROVIDER_DEFERRED",
+            "completeness_pct": 0.,
+            "missing_fields": mandatory,
+            "reason": "PROVIDER_RUNTIME_OR_ENTITLEMENT_UNAVAILABLE",
+        }
     if model == "CRYPTO_V1" and snapshot.get("analysis_price_source") != PRICE_SOURCE:
         return {
             "model": model,
