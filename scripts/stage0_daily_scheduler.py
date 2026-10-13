@@ -124,6 +124,9 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         "crypto_verified": [],
         "crypto_previously_verified": [],
         "crypto_provider_deferred": [],
+        "spot_verified": [],
+        "spot_previously_verified": [],
+        "spot_provider_deferred": [],
         "fmp_verified": [],
         "fmp_deferred": [],
         "fmp_stop_reason": "",
@@ -200,6 +203,77 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
                 raise SchedulerHalt("CRYPTO_CHECKPOINT_MISMATCH")
             result["crypto_verified"].append(symbol)
             sleep(1)
+
+        # Independent analytics SPOT history. Disabled unless the separate
+        # server-side Stage0 switch is on. Native Hyperliquid prices are NEVER
+        # promoted to underlying spot or used to fill missing spot data.
+        if config.get("crypto_spot_enabled") is True:
+            for symbol in CRYPTO:
+                if not budget_ok():
+                    result["status"] = "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN"
+                    break
+                assert_state(client, token, day)
+                derivative = crypto_checkpoint(client, token, day)
+                if symbol not in (derivative.get("completed_symbols") or []):
+                    result["spot_provider_deferred"].append(symbol)
+                    continue
+                spotcp = request(
+                    client,"GET",
+                    "/stage0/spot/checkpoint?day=" + day + "&symbol=" + symbol,
+                    token,
+                )
+                if spotcp.get("version") != VERSION or (
+                    spotcp.get("pending_reconciliation")
+                ):
+                    raise SchedulerHalt("SPOT_CHECKPOINT_INVALID")
+                if symbol in (spotcp.get("completed_symbols") or []):
+                    result["spot_previously_verified"].append(symbol)
+                    continue
+                try:
+                    spotcommit = request(
+                        client,"POST","/stage0/auto/spot-step",
+                        token,json_body={"symbol":symbol},
+                    )
+                except SchedulerHalt as exc:
+                    if str(exc) == "PROVIDER_DEFERRED":
+                        result["spot_provider_deferred"].append(symbol)
+                        continue
+                    if str(exc) == "ALREADY_COMMITTED_TODAY":
+                        current = request(
+                            client,"GET",
+                            "/stage0/spot/checkpoint?day=" + day
+                            + "&symbol=" + symbol,token,
+                        )
+                        if symbol not in (current.get("completed_symbols") or []):
+                            raise SchedulerHalt("SPOT_CHECKPOINT_MISMATCH") from None
+                        result["spot_previously_verified"].append(symbol)
+                        continue
+                    raise
+                if (
+                    spotcommit.get("version") != VERSION
+                    or spotcommit.get("symbol") != symbol
+                    or spotcommit.get("run_id") != run_id
+                    or spotcommit.get("status") != "COMMITTED_VERIFY_PASS"
+                    or spotcommit.get("daily_point_rows", 0) < 253
+                    or spotcommit.get("ranking_permitted") is not False
+                    or spotcommit.get("execution_permitted") is not False
+                ):
+                    raise SchedulerHalt("SPOT_COMMIT_UNVERIFIED")
+                current = request(
+                    client,"GET",
+                    "/stage0/spot/checkpoint?day=" + day + "&symbol=" + symbol,
+                    token,
+                )
+                if (
+                    symbol not in (current.get("completed_symbols") or [])
+                    or current.get("last_verified_symbol") != symbol
+                    or current.get("last_verified_run_id") != run_id
+                    or current.get("last_verified_spot_sha256")
+                       != spotcommit.get("spot_sha256")
+                ):
+                    raise SchedulerHalt("SPOT_CHECKPOINT_MISMATCH")
+                result["spot_verified"].append(symbol)
+                sleep(1)
 
         # FMP: exhaust the time/quota/provider budget, NOT a fixed symbol count.
         # Every step independently captures Sheets, commits, verifies, and
