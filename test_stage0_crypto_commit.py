@@ -70,7 +70,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
 
     async def test_wrong_confirmation_no_provider_or_journal(self):
         redis=FakeRedis()
-        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12"}):
+        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat()}):
             with self.assertRaisesRegex(Stage0Error,"EXPLICIT_CONFIRMATION_REQUIRED"):
                 await commit_one_native_perp(
                     "BTC","WRONG",redis=redis,client=None,now=NOW
@@ -82,7 +82,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
         with patch.dict("os.environ", {
             "ASKLIAM_CRYPTO_WRITE_ENABLED":"true",
             "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC",
-            "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12",
+            "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat(),
         }):
             with self.assertRaisesRegex(Stage0Error,"CRYPTO_WRITE_SCOPE_DENIED"):
                 await commit_one_native_perp(
@@ -122,7 +122,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
                         "Market_Data_Snapshot":{"status":"PASS"},
                         "FMP_Runtime_State":{"status":"PASS"}},
             }
-        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12"}):
+        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat()}):
             with patch("stage0_crypto_commit.acquire_native_perp_frames",
                        new=mock_acquire):
                 out=await commit_one_native_perp(
@@ -155,7 +155,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
             raise Stage0Error(
                 "PARTIAL_COMMIT_UNVERIFIED","Simulated lost Sheets reply"
             )
-        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12"}):
+        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat()}):
             with patch("stage0_crypto_commit.acquire_native_perp_frames",
                        new=mock_acquire):
                 with self.assertRaisesRegex(Stage0Error,"PARTIAL_COMMIT_UNVERIFIED"):
@@ -172,7 +172,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
         frames,report=prepare()
         async def mock_acquire(symbol,*,client,now,run_id):
             return frames,report
-        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12"}):
+        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat()}):
             with patch("stage0_crypto_commit.acquire_native_perp_frames",
                        new=mock_acquire):
                 with self.assertRaisesRegex(Stage0Error,"VERIFICATION_FAILED"):
@@ -190,7 +190,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
     async def test_preexisting_global_pending_blocks_before_source(self):
         redis=FakeRedis()
         redis.kv[pending_key(DAY)] = json.dumps({"status":"PREPARED"})
-        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":"2026-10-12"}):
+        with patch.dict("os.environ", {"ASKLIAM_CRYPTO_WRITE_ENABLED":"true", "ASKLIAM_CRYPTO_WRITE_SYMBOL":"BTC", "ASKLIAM_CRYPTO_WRITE_UTC_DAY":datetime.now(timezone.utc).date().isoformat()}):
             with self.assertRaisesRegex(Stage0Error,"RECONCILIATION_REQUIRED"):
                 await commit_one_native_perp(
                     "BTC",confirmation_for("BTC"),redis=redis,client=None,now=NOW
