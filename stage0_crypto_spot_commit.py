@@ -105,6 +105,25 @@ class GuardedSpotIngestor(Stage0_Daily_Ingestor):
         return plans, expected
 
 
+def preflight_spot_frames_sync(frames, symbol, run_id, observed_at):
+    """Fail predictable Sheet schema/ownership/collision errors BEFORE journal.
+
+    The actual writer will recapture STATE_BEFORE again, check fingerprint,
+    execute transactional UPSERT, and independently READ-BACK VERIFY.
+    """
+    reader=GuardedSpotIngestor(
+        frames,symbol,run_id,observed_at=observed_at,
+    )
+    before=reader._capture(reader._open())
+    plans,_expected=reader._plan(before,{
+        **frames,"FMP_Runtime_State":pd.DataFrame(),
+    })
+    return {
+        tab:{"inserts":len(plan["inserts"]),"updates":len(plan["updates"])}
+        for tab,plan in plans.items()
+    }
+
+
 def write_spot_frames_sync(frames, symbol, run_id, observed_at):
     return GuardedSpotIngestor(
         frames, symbol, run_id, observed_at=observed_at,
@@ -217,6 +236,11 @@ async def commit_coingecko_spot_one(
             raise Stage0Error("ALREADY_COMMITTED_TODAY", "Spot completed")
         frames, report = await acquire_coingecko_spot(
             symbol, client=client, redis=redis, now=now, run_id=run_id,
+        )
+        # No journal until the current workbook confirms same-run derivative
+        # fields/ownership, the dataset shape, and no foreign-sheet mutations.
+        await asyncio.to_thread(
+            preflight_spot_frames_sync, frames, symbol, run_id, now,
         )
         if datetime.now(timezone.utc).date().isoformat() != day:
             raise Stage0Error("UTC_DAY_CHANGED", "Spot acquisition crossed day")
