@@ -1,5 +1,6 @@
 """Read-only independent crypto spot adapter, no checkpoint or Sheets write."""
 from datetime import datetime, timezone
+import os
 
 import httpx
 
@@ -17,11 +18,15 @@ async def independent_spot_preview(symbol: str, client: httpx.AsyncClient, now=N
         raise SpotDataError("SPOT_UNKNOWN_SYMBOL")
     now = now or datetime.now(timezone.utc)
     coin_id = COINGECKO_IDS[symbol]
+    headers={"accept":"application/json"}
+    key=os.getenv("COINGECKO_DEMO_API_KEY", "").strip()
+    if key:
+        headers["x-cg-demo-api-key"]=key
     try:
         response = await client.get(
             BASE + "/coins/" + coin_id + "/market_chart",
             params={"vs_currency":"usd","days":"365"},
-            headers={"accept":"application/json"},
+            headers=headers,
             timeout=30,
         )
     except httpx.HTTPError:
