@@ -265,6 +265,9 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
 
 
 def main() -> int:
+    if os.getenv("ASKLIAM_CRON_ENABLED", "").lower() != "true":
+        print(json.dumps({"version": VERSION, "status": "CRON_DISARMED", "wrote_data": False}))
+        return 0
     token = os.getenv("ASKLIAM_SERVICE_TOKEN", "")
     if not token:
         print(json.dumps({"version": VERSION, "status": "HALTED",
