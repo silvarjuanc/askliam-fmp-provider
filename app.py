@@ -745,6 +745,79 @@ async def stage0_crypto_checkpoint(day: str, symbol: str = "BTC"):
         raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
 
 
+class CryptoAutomaticStepRequest(BaseModel):
+    """Authenticated, environment-gated single crypto Stage0 step."""
+    symbol: str = Field(min_length=2, max_length=12)
+
+
+@app.get("/stage0/auto/config", dependencies=[Depends(require_token)])
+async def stage0_auto_config():
+    """No secrets. Used by the scheduled runner to fail closed."""
+    return {
+        "version": VERSION,
+        "stage0_auto_enabled": os.getenv("ASKLIAM_STAGE0_AUTO_ENABLED", "").lower() == "true",
+        "crypto_auto_enabled": os.getenv("ASKLIAM_CRYPTO_AUTO_ENABLED", "").lower() == "true",
+        "fmp_stage0_enabled": os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() == "true",
+        "manual_crypto_write_enabled": os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true",
+        "redis_configured": provider.state is not None,
+        "sheets_configured": bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") and os.getenv("ASKLIAM_SPREADSHEET_ID")),
+        "ranking_permitted": False,
+        "execution_permitted": False,
+    }
+
+
+@app.post("/stage0/auto/crypto-step", dependencies=[Depends(require_token)])
+async def stage0_auto_crypto_step(request: CryptoAutomaticStepRequest):
+    """Only the scheduled driver may request server-side gated ingestion.
+
+    This route NEVER bypasses Stage0 Redis's global pending journal, shared
+    exclusive lease, Google Sheets state check, or independent readback.
+    """
+    from stage0_crypto_commit import (
+        commit_one_native_perp, confirmation_for, automation_guard,
+    )
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    symbol = request.symbol.strip().upper()
+    try:
+        automation_guard(symbol, confirmation_for(symbol))
+        if provider.state is None or provider.client is None:
+            raise HTTPException(503, "SOURCE_UNAVAILABLE")
+        universe = await read_universe_cached(provider.state)
+        eligible = {entry["symbol"] for entry in universe
+                    if entry.get("route") == "CRYPTO_PROVIDER_PENDING"}
+        if symbol not in COINGECKO_IDS or symbol not in eligible:
+            raise HTTPException(422, "CRYPTO_SYMBOL_NOT_ENABLED")
+        return await commit_one_native_perp(
+            symbol, confirmation_for(symbol), redis=provider.state,
+            client=provider.client, automation_mode=True,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        code = 403 if exc.status in (
+            "CRYPTO_AUTO_DISABLED", "MANUAL_CRYPTO_WRITE_STILL_ENABLED",
+            "EXPLICIT_CONFIRMATION_REQUIRED",
+        ) else 409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "ALREADY_COMMITTED_TODAY",
+            "CONCURRENT_RUN_BLOCKED", "CHECKPOINT_NOT_COMMITTED", "SNAPSHOT_COLLISION",
+        ) else 503
+        raise HTTPException(code, {
+            "stage0_status": exc.status,
+            "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, {
+            "stage0_status": "AUTO_CRYPTO_COMMIT_HALTED",
+            "checkpoint_advanced": False, "ranking_permitted": False,
+            "execution_permitted": False,
+        }) from None
+
+
 class CryptoSingleCommitRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
     confirmation: str = Field(min_length=8, max_length=100)

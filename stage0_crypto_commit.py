@@ -57,6 +57,25 @@ def confirmation_for(symbol: str) -> str:
     return CONFIRM_PREFIX + symbol + CONFIRM_SUFFIX
 
 
+def automation_guard(symbol: str, confirmation: str):
+    """Separate server-side opt-in; never grants manual endpoint permissions.
+
+    Only the authenticated internal automation route can select this mode.
+    An explicitly enabled manual writer must first be closed to avoid mixing
+    operator-controlled first import and unattended daily ingestion.
+    """
+    if os.getenv("ASKLIAM_STAGE0_AUTO_ENABLED", "").lower() != "true" or (
+        os.getenv("ASKLIAM_CRYPTO_AUTO_ENABLED", "").lower() != "true"
+    ):
+        raise Stage0Error("CRYPTO_AUTO_DISABLED", "Automatic crypto writes not enabled")
+    if os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true":
+        raise Stage0Error("MANUAL_CRYPTO_WRITE_STILL_ENABLED", "Close manual writer before automation")
+    if symbol not in COINGECKO_IDS or confirmation != confirmation_for(symbol):
+        raise Stage0Error("EXPLICIT_CONFIRMATION_REQUIRED", "Canonical crypto scope mismatch")
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
+        raise Stage0Error("CONFIGURATION_FAILED", "Missing Sheets credentials or workbook")
+
+
 def feature_guard(symbol: str, confirmation: str):
     """Call before any network/sheet/Redis operation."""
     if os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() != "true":
@@ -167,9 +186,13 @@ async def commit_one_native_perp(
     symbol: str, confirmation: str, *,
     redis, client: httpx.AsyncClient, now: datetime | None = None,
     writer=write_crypto_frames_sync,
+    automation_mode: bool = False,
 ) -> dict:
     symbol = str(symbol).strip().upper()
-    feature_guard(symbol, confirmation)
+    if automation_mode:
+        automation_guard(symbol, confirmation)
+    else:
+        feature_guard(symbol, confirmation)
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
         raise Stage0Error("INVALID_TIMESTAMP", "UTC aware timestamp required")
