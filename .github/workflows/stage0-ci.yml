@@ -25,9 +25,12 @@ jobs:
         run: |
           $tokens = $null
           $parseErrors = $null
-          $file = (Resolve-Path scripts/stage0_daily_firetest.ps1).Path
-          [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count -gt 0) {
-            $parseErrors | ForEach-Object { Write-Error $_.Message }
-            exit 1
+          foreach ($relative in @('scripts/stage0_daily_firetest.ps1', 'scripts/stage0_crypto_preflight_7.ps1')) {
+            $parseErrors = $null
+            $file = (Resolve-Path $relative).Path
+            [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$tokens, [ref]$parseErrors) | Out-Null
+            if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_.Message }
+              exit 1
+            }
           }
