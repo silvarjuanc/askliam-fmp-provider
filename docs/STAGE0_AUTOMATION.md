@@ -10,7 +10,7 @@ trades, or converts perpetual/futures data into independent spot quotes.
 
 - Cron UTC expression: `0 20,21 * * 1-5`.
 - The Python scheduler checks `America/New_York` and executes only at
-  16:00–16:44 local New York time on weekdays, avoiding a double-run across
+  16:00–16:59 local New York time on weekdays, avoiding a double-run across
   summer/winter time changes.
 - Cron source: `https://github.com/silvarjuanc/askliam-fmp-provider`,
   branch `main`, Python, `pip install -r requirements.txt`.
