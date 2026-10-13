@@ -145,10 +145,11 @@ class SpotCommitSafetyTests(unittest.IsolatedAsyncioTestCase):
                 with patch("stage0_crypto_spot_commit.acquire_coingecko_spot",return_value=prepared):
                     def failed_writer(*args):
                         raise RuntimeError("MOCK_SHEETS_PARTIAL")
-                    with self.assertRaisesRegex(RuntimeError,"MOCK_SHEETS_PARTIAL"):
-                        await commit_coingecko_spot_one(
-                            "BTC",redis=redis,client=object(),now=NOW,writer=failed_writer,
-                        )
+                    with patch("stage0_crypto_spot_commit.preflight_spot_frames_sync",return_value={}):
+                        with self.assertRaisesRegex(RuntimeError,"MOCK_SHEETS_PARTIAL"):
+                            await commit_coingecko_spot_one(
+                                "BTC",redis=redis,client=object(),now=NOW,writer=failed_writer,
+                            )
         self.assertIn(pending_key(day),redis.values)
         self.assertNotIn(spot_checkpoint_key(day),redis.values)
 
