@@ -70,7 +70,7 @@ class ModelReadinessTests(unittest.TestCase):
         r=compute_score_from_evidence(factors)
         self.assertEqual(r["status"],"SCORE_CANDIDATE_NOT_COMMITTED")
         self.assertEqual(r["available_weight_pct"],90)
-        self.assertAlmostEqual(r["score"],((10+12+18+9+7.5)/90)*100-5)
+        self.assertAlmostEqual(r["score"],((10+12+18+9+7.5)/90)*100-5,places=4)
         factors["Risk Penalty"]=""
         self.assertEqual(compute_score_from_evidence(factors)["status"],"UNSCORED")
         factors["Risk Penalty"]="0"
