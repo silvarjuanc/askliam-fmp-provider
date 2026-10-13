@@ -885,6 +885,16 @@ async def stage0_auto_spot_step(request: CryptoSpotStepRequest):
         }) from None
 
 
+@app.get("/stage0/fmp/history-quality", dependencies=[Depends(require_token)])
+async def stage0_fmp_history_quality_preview():
+    """Read-only: identify FMP OHLCV/volume captured before NY EOD buffer."""
+    from stage0_fmp_session_quality import audit_fmp_history_sync
+    try:
+        return await asyncio.to_thread(audit_fmp_history_sync)
+    except Exception:
+        raise HTTPException(503,"FMP_HISTORY_AUDIT_UNAVAILABLE") from None
+
+
 @app.get("/stage1/readiness", dependencies=[Depends(require_token)])
 async def stage1_readiness_preview(run_id: str):
     """Real Sheets readiness inventory only. NO scores/Ranking/Lifecycle writes."""
