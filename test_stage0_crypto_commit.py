@@ -14,8 +14,9 @@ from stage0_ingestor import Stage0Error
 from test_stage0_crypto_ingest_prepare import prepare, RUN
 from test_stage0_crypto_sheet_preflight import captured_state
 
-NOW = datetime(2026,10,12,15,0,tzinfo=timezone.utc)
-DAY = "2026-10-12"
+NOW = datetime.now(timezone.utc).replace(hour=15, minute=0, second=0, microsecond=0)
+DAY = NOW.date().isoformat()
+RUNTIME_RUN = "STAGE0-" + NOW.strftime("%Y%m%d") + "-V6.5.1"
 
 
 class FakeRedis:
@@ -111,7 +112,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
         writes=[]
         async def mock_acquire(symbol,*,client,now,run_id):
             self.assertEqual(symbol,"BTC")
-            self.assertEqual(run_id,RUN)
+            self.assertEqual(run_id,RUNTIME_RUN)
             return frames, report
         def mock_writer(f,s,r):
             writes.append((s,r,len(f["Raw_OHLCV"])))
@@ -134,7 +135,7 @@ class CommitGuards(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(out["ranking_permitted"])
                 self.assertFalse(out["execution_permitted"])
                 self.assertFalse(out["fmp_requests_performed"])
-                self.assertEqual(writes,[("BTC",RUN,150)])
+                self.assertEqual(writes,[("BTC",RUNTIME_RUN,150)])
                 self.assertNotIn(pending_key(DAY),redis.kv)
                 checkpoint=json.loads(redis.kv[crypto_checkpoint_key(DAY)])
                 self.assertEqual(checkpoint["completed_symbols"],["BTC"])
