@@ -13,7 +13,7 @@ def available(value):
     if isinstance(value,(float,int)): return math.isfinite(value)
     if not isinstance(value,str): return False
     value=value.strip()
-    if not value or value.upper() in {"NAN","NULL","NONE","UNKNOWN","PENDING"}: return False
+    if not value or value.upper() in {"NAN","NULL","NONE","UNKNOWN","PENDING","TRUE","FALSE"}: return False
     try: return math.isfinite(float(value))
     except ValueError: return True
 
@@ -24,7 +24,7 @@ def rule_ok(rule,record):
         try: return float(record[key])>=float(limit)
         except (TypeError,ValueError): return False
     if "_or_" in rule:
-        return any(available(record.get(key)) for key in rule.split("_or_"))
+        return available(record.get(rule)) or any(available(record.get(key)) for key in rule.split("_or_"))
     return available(record.get(rule))
 
 def validate_mandatory(record,spec):
