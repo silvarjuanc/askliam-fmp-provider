@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import httpx
 
 from stage0_crypto_probe import COINGECKO_IDS
+from stage0_canonical_factors import canonical_technicals
 from stage0_crypto_spot_history import (
     SpotDataError, validate_spot_series, raw_spot_indicators, readiness_preview,
 )
@@ -34,4 +35,11 @@ async def independent_spot_preview(symbol: str, client: httpx.AsyncClient, now=N
     try: payload=response.json()
     except ValueError: raise SpotDataError("SPOT_INVALID_JSON") from None
     history=validate_spot_series(payload, symbol, now)
-    return readiness_preview(history, raw_spot_indicators(history))
+    result=readiness_preview(history, raw_spot_indicators(history))
+    result["canonical_technicals"] = canonical_technicals(
+        [r["spot_price"] for r in history["rows"]]
+    )
+    result["canonical_volume_score"] = None  # historical 24h volume not a validated session volume
+    result["mandatory_broad_pass"] = False
+    result["ranking_permitted"] = False
+    return result
