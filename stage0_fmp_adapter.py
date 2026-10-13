@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 import httpx
 import pandas as pd
+from stage0_fmp_session_quality import provider_eod_date_guard
 
 
 def provider_failure_code(errors):
@@ -242,6 +243,15 @@ class ExistingFMPStage0Adapter:
                 if not isinstance(candle, dict) or not candle.get("date"):
                     continue
                 when = str(candle["date"])[:10]
+                # Same-day FMP bars may carry partial volume. No current
+                # US daily bar enters the store before its 18:00 NY buffer.
+                try:
+                    if not provider_eod_date_guard(
+                        when, datetime.fromisoformat(now),
+                    ):
+                        continue
+                except ValueError:
+                    continue
                 row = {
                     "ranking_run_id": self.run_id,
                     "canonical_symbol": symbol,
@@ -257,8 +267,8 @@ class ExistingFMPStage0Adapter:
                     "volume": candle.get("volume"),
                     "fetched_at_utc": now,
                     "upsert_key": f"{symbol}|{when}|FMP",
-                    "quality_status": "RECEIVED_UNVERIFIED",
-                    "notes": "",
+                    "quality_status": "EOD_SESSION_BUFFER_PASS_PROVIDER_UNCONFIRMED",
+                    "notes": "Bar captured after 18:00 New York date buffer; this is not an official settlement certificate",
                 }
                 bars.append(row)
                 historical_counts[symbol] += 1
