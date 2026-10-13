@@ -27,8 +27,11 @@ def preview_broad(universe,snapshots,specs,factor_evidence,run_id):
             evidence=factor_evidence.get(symbol) or {}
             if check["mandatory_input_complete"] and evidence.get("source_quality_verified") is True:
                 if evidence.get("risk_penalty") is not None:
-                    score=normalize_score(evidence.get("factor_points") or {},
-                                          evidence["risk_penalty"],mandatory_complete=True)
+                    try:
+                        score=normalize_score(evidence.get("factor_points") or {},
+                                              evidence["risk_penalty"],mandatory_complete=True)
+                    except (TypeError,ValueError,OverflowError):
+                        score=None
                     if score is not None:
                         record["score_status"]="SCORED"
                         record["global_score"]=round(score,5)
