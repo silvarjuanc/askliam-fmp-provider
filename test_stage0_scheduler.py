@@ -3,10 +3,11 @@
 No Render, Sheets, Upstash, FMP or Hyperliquid requests are performed.
 """
 import unittest
+import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 from scripts.stage0_daily_scheduler import (
-    VERSION, CRYPTO, SchedulerHalt, run, schedule_gate, safe_error,
+    VERSION, CRYPTO, SchedulerHalt, run, schedule_gate, safe_error, main,
 )
 import httpx
 
@@ -16,6 +17,17 @@ WINTER = datetime(2026, 12, 14, 21, 0, tzinfo=UTC)
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_disarmed_cron_does_not_require_credentials(self):
+        import io
+        from contextlib import redirect_stdout
+        buffer = io.StringIO()
+        with patch.dict(os.environ, {"ASKLIAM_CRON_ENABLED": "false",
+                                    "ASKLIAM_SERVICE_TOKEN": ""}, clear=True):
+            with redirect_stdout(buffer):
+                exit_code = main()
+        self.assertEqual(exit_code, 0)
+        self.assertIn("CRON_DISARMED", buffer.getvalue())
+
     def test_exact_new_york_wall_clock_across_dst(self):
         self.assertTrue(schedule_gate(SUMMER))
         self.assertTrue(schedule_gate(WINTER))
