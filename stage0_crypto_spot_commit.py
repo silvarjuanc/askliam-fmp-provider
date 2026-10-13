@@ -256,7 +256,7 @@ async def commit_coingecko_spot_one(
             checkpoint, separators=(",", ":"), sort_keys=True,
         )
         cas = await redis.eval(
-            __import__("stage0_crypto_commit").COMMIT_LUA,
+            COMMIT_LUA,
             [LOCK_KEY, pending_key(day), spot_checkpoint_key(day)],
             [token, journal_raw, "1" if stored else "0",
              stored or "", next_checkpoint],
