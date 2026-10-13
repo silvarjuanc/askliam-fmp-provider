@@ -39,7 +39,7 @@ def schedule_gate(now: datetime) -> bool:
         raise ValueError("timezone-aware UTC required")
     local = now.astimezone(NY)
     # Tolerate reasonable cron startup delay without allowing a late rerun.
-    return local.weekday() < 5 and local.hour == 16 and local.minute < 45
+    return local.weekday() < 5 and local.hour == 16
 
 
 def safe_error(response: httpx.Response) -> str:
