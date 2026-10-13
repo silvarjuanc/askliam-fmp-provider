@@ -18,6 +18,7 @@ trades, or converts perpetual/futures data into independent spot quotes.
 - Recommended Render region: Frankfurt.
 - New Render Cron services can be billable. Confirm the selected plan and cost
   before creation; do not create multiple cron instances.
+- Cron is created with `ASKLIAM_CRON_ENABLED=false`: disarmed, no HTTP calls or writes, and no token needed yet. Arm only after a full smoke test and secret setup.
 - Cron service requires only one manually provisioned **secret**
   `ASKLIAM_SERVICE_TOKEN` matching the existing web service's token, stored
   in Render environment settings. Never commit, print, or send this value in chat.
