@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - run: python -m compileall -q app.py stage0_ingestor.py stage0_fmp_adapter.py stage0_batch.py stage0_daily.py stage0_crypto_probe.py stage0_crypto_history_probe.py stage0_crypto_ingest_prepare.py stage0_crypto_sheet_preflight.py stage0_crypto_commit.py stage0_crypto_checkpoint_read.py scripts/stage0_daily_scheduler.py stage0_fmp_cooldown.py stage0_reconcile.py
+      - run: python -m compileall -q app.py stage0_ingestor.py stage0_fmp_adapter.py stage0_batch.py stage0_daily.py stage0_crypto_probe.py stage0_crypto_history_probe.py stage0_crypto_ingest_prepare.py stage0_crypto_sheet_preflight.py stage0_crypto_commit.py stage0_crypto_checkpoint_read.py scripts/stage0_daily_scheduler.py stage0_crypto_spot.py stage0_crypto_spot_commit.py stage0_fmp_session_quality.py stage1_readiness.py stage0_fmp_cooldown.py stage0_reconcile.py
       - run: python -m unittest discover -p 'test_*.py' -v
       - name: Validate PowerShell runner syntax
         shell: pwsh

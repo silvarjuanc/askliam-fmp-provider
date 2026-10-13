@@ -745,6 +745,168 @@ async def stage0_crypto_checkpoint(day: str, symbol: str = "BTC"):
         raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
 
 
+class CryptoSpotStepRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+
+
+@app.get("/stage0/spot/checkpoint", dependencies=[Depends(require_token)])
+async def stage0_spot_checkpoint(day: str, symbol: str = "BTC"):
+    """Read-only Redis spot checkpoint; not the native-perp checkpoint."""
+    from datetime import date
+    from stage0_crypto_spot_commit import spot_checkpoint_key
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_batch import pending_key
+    from stage0_ingestor import Stage0Error
+    selected = symbol.strip().upper()
+    if selected not in COINGECKO_IDS:
+        raise HTTPException(422, "CRYPTO_SYMBOL_NOT_MAPPED")
+    try:
+        parsed = date.fromisoformat(day)
+        if parsed.isoformat() != day or parsed > datetime.now(timezone.utc).date():
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise HTTPException(422, "INVALID_UTC_DAY") from None
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        raw = await provider.state.call("GET", spot_checkpoint_key(day))
+        pending = await provider.state.call("GET", pending_key(day))
+        cp = json.loads(raw) if raw else {}
+        done = cp.get("completed_symbols", [])
+        if raw and (
+            cp.get("version") != VERSION or cp.get("utc_date") != day
+            or cp.get("provider") != "COINGECKO_SPOT_USD_DAILY_POINT"
+            or not isinstance(done, list) or len(set(done)) != len(done)
+            or any(sym not in COINGECKO_IDS for sym in done)
+            or cp.get("status") != "COMMITTED_VERIFY_PASS"
+        ):
+            raise ValueError("SPOT_CHECKPOINT_INVALID")
+        return {
+            "version": VERSION, "utc_date": day, "symbol": selected,
+            "reader_only": True,
+            "checkpoint_found": bool(raw),
+            "checkpoint_status": cp.get("status","NOT_FOUND"),
+            "completed_symbols": done,
+            "symbol_checkpoint_verified": selected in done and not bool(pending),
+            "last_verified_symbol": cp.get("last_verified_symbol"),
+            "last_verified_spot_sha256": cp.get("last_verified_spot_sha256"),
+            "last_verified_run_id": cp.get("last_verified_run_id"),
+            "pending_reconciliation": bool(pending),
+            "spot_write_enabled": os.getenv("ASKLIAM_CRYPTO_SPOT_ENABLED","").lower()=="true",
+            "sheet_writes_performed": False, "ranking_permitted": False,
+            "execution_permitted": False,
+        }
+    except StorageError:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE") from None
+    except (ValueError, TypeError, KeyError):
+        raise HTTPException(409,"SPOT_CHECKPOINT_INVALID") from None
+
+
+@app.get("/stage0/spot/preflight", dependencies=[Depends(require_token)])
+async def stage0_spot_preflight(symbol: str):
+    """CoinGecko independent SPOT reads + strict preparation, NO Sheet writer."""
+    from stage0_crypto_spot_commit import acquire_coingecko_spot
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_ingestor import Stage0Error
+    selected = symbol.strip().upper()
+    if selected not in COINGECKO_IDS:
+        raise HTTPException(422,"CRYPTO_SYMBOL_NOT_MAPPED")
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503,"SOURCE_UNAVAILABLE")
+    now = datetime.now(timezone.utc)
+    run_id = "STAGE0-" + now.strftime("%Y%m%d") + "-V6.5.1"
+    try:
+        _frames, report = await acquire_coingecko_spot(
+            selected, client=provider.client, redis=provider.state,
+            now=now, run_id=run_id,
+        )
+        return {
+            **report,"status":"SPOT_PREFLIGHT_PREPARED",
+            "reader_only":True,"sheet_writes_performed":False,
+            "checkpoint_advanced":False,
+            "ranking_permitted":False,"execution_permitted":False,
+        }
+    except Stage0Error as exc:
+        return {
+            "version":VERSION, "symbol":selected, "status":"PROVIDER_DEFERRED",
+            "reason":exc.detail, "sheet_writes_performed":False,
+            "ranking_permitted":False,"execution_permitted":False,
+        }
+    except StorageError:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE") from None
+
+
+@app.post("/stage0/auto/spot-step", dependencies=[Depends(require_token)])
+async def stage0_auto_spot_step(request: CryptoSpotStepRequest):
+    """Opt-in, transactionally verified independent SPOT point-series ingest."""
+    from stage0_crypto_spot_commit import (
+        commit_coingecko_spot_one, spot_automation_guard,
+    )
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_daily import read_universe_cached
+    from stage0_ingestor import Stage0Error
+    selected = request.symbol.strip().upper()
+    try:
+        spot_automation_guard(selected)
+        if provider.state is None or provider.client is None:
+            raise HTTPException(503,"SOURCE_UNAVAILABLE")
+        universe = await read_universe_cached(provider.state)
+        permitted = {x["symbol"] for x in universe
+                     if x.get("route")=="CRYPTO_PROVIDER_PENDING"}
+        if selected not in COINGECKO_IDS or selected not in permitted:
+            raise HTTPException(422,"CRYPTO_SYMBOL_NOT_ENABLED")
+        return await commit_coingecko_spot_one(
+            selected,redis=provider.state,client=provider.client,
+        )
+    except HTTPException:
+        raise
+    except Stage0Error as exc:
+        status=403 if exc.status in ("SPOT_WRITES_DISABLED","CRYPTO_AUTO_DISABLED",
+                                    "MANUAL_CRYPTO_WRITE_STILL_ENABLED") else (
+            409 if exc.status in ("ALREADY_COMMITTED_TODAY","RECONCILIATION_REQUIRED",
+                                  "CONCURRENT_RUN_BLOCKED","SPOT_SNAPSHOT_COLLISION",
+                                  "DERIVATIVE_NOT_ACQUIRED","CHECKPOINT_NOT_COMMITTED")
+            else 503
+        )
+        raise HTTPException(status,{
+            "stage0_status":exc.status,
+            "sheet_writes_performed":False if exc.status in (
+                "SPOT_WRITES_DISABLED","PROVIDER_DEFERRED",
+                "DERIVATIVE_NOT_ACQUIRED","ALREADY_COMMITTED_TODAY"
+            ) else None,
+            "ranking_permitted":False,"execution_permitted":False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503,{
+            "stage0_status":"SPOT_COMMIT_HALTED",
+            "ranking_permitted":False,"execution_permitted":False,
+        }) from None
+
+
+@app.get("/stage0/fmp/history-quality", dependencies=[Depends(require_token)])
+async def stage0_fmp_history_quality_preview():
+    """Read-only: identify FMP OHLCV/volume captured before NY EOD buffer."""
+    from stage0_fmp_session_quality import audit_fmp_history_sync
+    try:
+        return await asyncio.to_thread(audit_fmp_history_sync)
+    except Exception:
+        raise HTTPException(503,"FMP_HISTORY_AUDIT_UNAVAILABLE") from None
+
+
+@app.get("/stage1/readiness", dependencies=[Depends(require_token)])
+async def stage1_readiness_preview(run_id: str):
+    """Real Sheets readiness inventory only. NO scores/Ranking/Lifecycle writes."""
+    from stage1_readiness import stage1_preview_sync
+    try:
+        return await asyncio.to_thread(stage1_preview_sync,run_id)
+    except ValueError:
+        raise HTTPException(422,"INVALID_STAGE1_RUN_ID_OR_MODEL") from None
+    except Exception:
+        raise HTTPException(503,"STAGE1_PREVIEW_UNAVAILABLE") from None
+
+
 class CryptoAutomaticStepRequest(BaseModel):
     """Authenticated, environment-gated single crypto Stage0 step."""
     symbol: str = Field(min_length=2, max_length=12)
@@ -757,6 +919,7 @@ async def stage0_auto_config():
         "version": VERSION,
         "stage0_auto_enabled": os.getenv("ASKLIAM_STAGE0_AUTO_ENABLED", "").lower() == "true",
         "crypto_auto_enabled": os.getenv("ASKLIAM_CRYPTO_AUTO_ENABLED", "").lower() == "true",
+        "crypto_spot_enabled": os.getenv("ASKLIAM_CRYPTO_SPOT_ENABLED", "").lower() == "true",
         "fmp_stage0_enabled": os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() == "true",
         "manual_crypto_write_enabled": os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true",
         "redis_configured": provider.state is not None,
