@@ -14,6 +14,13 @@ class ReadinessTests(unittest.TestCase):
   self.assertTrue(x["mandatory_input_complete"])
   self.assertFalse(x["broad_scan_ready"])
   self.assertFalse(x["ranking_permitted"])
+ def test_named_proxy_field_is_a_real_mandatory_value(self):
+  spec={"Model":"INDEX_V1","Broad Min %":"70",
+        "Broad Mandatory Data":"last_price; breadth_score_or_proxy"}
+  row={"score_model":"INDEX_V1","last_price":100,"breadth_score_or_proxy":55}
+  self.assertTrue(validate_mandatory(row,spec)["mandatory_input_complete"])
+  row["breadth_score_or_proxy"]="FALSE"
+  self.assertFalse(validate_mandatory(row,spec)["mandatory_input_complete"])
  def test_wrong_model(self):
   with self.assertRaises(ReadinessError):
    validate_mandatory({"score_model":"FX_V1"},SPEC)
