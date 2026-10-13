@@ -1004,6 +1004,51 @@ async def stage0_crypto_history_probe(symbol: str):
         raise HTTPException(503, "CRYPTO_HISTORY_PROBE_UNAVAILABLE") from None
 
 
+@app.get("/stage0/crypto/independent-spot-preview", dependencies=[Depends(require_token)])
+async def stage0_independent_spot_preview(symbol: str):
+    """Read-only CoinGecko spot-price-sample check. Never creates OHLC or scores."""
+    from stage0_crypto_spot_adapter import independent_spot_preview
+    from stage0_crypto_spot_history import SpotDataError
+    if provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        return await independent_spot_preview(symbol, provider.client)
+    except SpotDataError as exc:
+        code = 429 if str(exc) == "SPOT_RATE_LIMIT_BACKOFF" else 422 if str(exc) in (
+            "SPOT_UNKNOWN_SYMBOL", "SPOT_INSUFFICIENT_HISTORY",
+            "SPOT_DAILY_GAP", "SPOT_DATE_MISMATCH", "SPOT_STALE",
+        ) else 503
+        raise HTTPException(code, {
+            "status": str(exc), "mandatory_broad_pass": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+
+
+@app.get("/stage0/crypto/spot-ohlcv-preview", dependencies=[Depends(require_token)])
+async def stage0_spot_ohlcv_preview(symbol: str):
+    """Independent daily spot OHLCV quality probe; no sheets or scoring writes."""
+    from stage0_crypto_spot_ohlcv import probe_ohlc, OHLCError
+    from stage0_canonical_factors import canonical_technicals
+    if provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        result = await probe_ohlc(symbol, provider.client)
+        tech = canonical_technicals([r["close"] for r in result["rows"]])
+        return {
+            "version": VERSION, "symbol": result["symbol"],
+            "source": result["source"], "daily_bars": result["daily_bars"],
+            "last_complete_utc_date": result["rows"][-1]["trading_date"],
+            "canonical_technicals": tech,
+            "ranking_permitted": False, "execution_permitted": False,
+            "sheet_writes_performed": False, "status": "OHLCV_PREVIEW_ONLY",
+        }
+    except OHLCError as exc:
+        raise HTTPException(503, {
+            "stage0_status": str(exc), "ranking_permitted": False,
+            "execution_permitted": False,
+        }) from None
+
+
 @app.get("/stage0/crypto/source-probe", dependencies=[Depends(require_token)])
 async def stage0_crypto_source_probe():
     """Read-only provider preview of Universe CRYPTO_V1; does not persist prices."""

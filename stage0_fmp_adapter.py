@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 import httpx
 import pandas as pd
+from stage0_equity_session_gate import partition_confirmed_bars
 
 
 def provider_failure_code(errors):
@@ -235,8 +236,13 @@ class ExistingFMPStage0Adapter:
             }
             quotes.append(snapshot)
             historical_counts[symbol] = 0
+            # Never persist an unconfirmed in-session bar whose volume is
+            # partial; previous historical observations remain untouched.
+            confirmed, dropped = partition_confirmed_bars(
+                (result.get("historical") or []), datetime.now(timezone.utc),
+            )
             for candle in sorted(
-                (b for b in (result.get("historical") or []) if isinstance(b, dict) and b.get("date")),
+                (b for b in confirmed if isinstance(b, dict) and b.get("date")),
                 key=lambda b: str(b["date"]),
             )[-300:]:
                 if not isinstance(candle, dict) or not candle.get("date"):
