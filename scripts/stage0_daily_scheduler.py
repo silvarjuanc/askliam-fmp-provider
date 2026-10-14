@@ -141,6 +141,7 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         "crypto_provider_deferred": [],
         "fmp_verified": [],
         "fmp_deferred": [],
+        "fmp_operationally_held": [],
         "fmp_stop_reason": "",
         "ranking_permitted": False,
         "execution_permitted": False,
@@ -196,10 +197,16 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
             except SchedulerHalt as exc:
                 # Never retry failed/uncertain FMP writes automatically.
                 raise SchedulerHalt("FMP_STEP_HALTED_" + str(exc)) from None
-            if step.get("status") == "PROVIDER_DEFERRED":
+            if step.get("status") in ("PROVIDER_DEFERRED","OPERATIONALLY_HELD"):
                 if step.get("symbol") != expected or step.get("checkpoint_advanced") is not False:
                     raise SchedulerHalt("FMP_DEFERRED_INCONSISTENT")
-                result["fmp_deferred"].append(expected)
+                state = assert_state(client, token, day)
+                if expected not in (state.get("deferred_today") or {}):
+                    raise SchedulerHalt("FMP_HOLD_CHECKPOINT_MISSING")
+                if step["status"] == "OPERATIONALLY_HELD":
+                    result["fmp_operationally_held"].append(expected)
+                else:
+                    result["fmp_deferred"].append(expected)
             elif step.get("status") == "SOURCE_RETRYABLE":
                 result["fmp_stop_reason"] = "FMP_RETRYABLE_SOURCE"
                 break
