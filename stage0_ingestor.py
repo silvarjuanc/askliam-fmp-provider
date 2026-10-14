@@ -76,6 +76,9 @@ class Stage0_Daily_Ingestor:
         self.credentials_env = credentials_env
         self.max_batch_cells = max_batch_cells
         self.max_append_rows = max_append_rows
+        # Set before any acquisition; only True at the exact point a Sheets
+        # write may have begun. Required for SAFE prewrite journal disposal.
+        self.write_started = False
         if not self.spreadsheet_id:
             raise Stage0Error("CONFIGURATION_FAILED", "ASKLIAM_SPREADSHEET_ID is missing")
         if not self.providers or not all(callable(p) for p in self.providers.values()):
@@ -375,6 +378,7 @@ class Stage0_Daily_Ingestor:
         if not _RUN_GUARD.acquire(blocking=False):
             raise Stage0Error("CONCURRENT_RUN_BLOCKED", "Stage 0 already executing")
         committed = False
+        self.write_started = False
         try:
             before = self._capture(self._open())
             before_hash = self._fingerprint(before)
@@ -387,6 +391,7 @@ class Stage0_Daily_Ingestor:
             if self._fingerprint(fresh) != before_hash:
                 raise Stage0Error("CONCURRENT_MODIFICATION", "Workbook changed after STATE_BEFORE")
             committed = True  # a write could succeed and the response fail
+            self.write_started = True  # any later error MUST retain journal
             try:
                 self._commit(fresh, plans)
             except Exception as exc:
