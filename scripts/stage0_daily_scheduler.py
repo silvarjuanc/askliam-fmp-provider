@@ -263,6 +263,18 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
 
         assert_state(client, token, day)
         crypto_checkpoint(client, token, day)
+        # The connected ChatGPT run cannot call protected Redis with a service
+        # token. Mirror non-secret final evidence into the workbook after
+        # all Stage0 writes. Mirror failures are observable but never mislabel
+        # acquisition checkpoints as unverified.
+        try:
+            mirror = request(client, "POST", "/stage0/auto/runtime-evidence-sync", token)
+            result["evidence_sync_status"] = mirror.get("sync_status", "UNKNOWN")
+            result["evidence_spot_verified"] = mirror.get("spot_verified", [])
+            result["evidence_fmp_used"] = mirror.get("fmp_used")
+            result["evidence_fmp_remaining"] = mirror.get("fmp_remaining")
+        except SchedulerHalt as exc:
+            result["evidence_sync_status"] = "DEFERRED_" + str(exc)
         if result["status"] == "RUNNING":
             result["status"] = "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED"
     except SchedulerHalt as exc:
