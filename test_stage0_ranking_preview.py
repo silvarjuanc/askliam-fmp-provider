@@ -11,6 +11,8 @@ class PreviewTests(unittest.TestCase):
   x=preview_broad(UNI,[],SPEC,{},RUN)
   self.assertEqual(x["scored_count"],0)
   self.assertFalse(x["publication_permitted"])
+  self.assertEqual(x["data_wait_count"],0)
+  self.assertEqual(x["not_acquired_count"],2)
  def test_valid_one_scored_second_data_wait(self):
   snap=[{"ranking_run_id":RUN,"canonical_symbol":"BTC",
          "score_model":"CRYPTO_V1","last_price":100,
@@ -21,7 +23,9 @@ class PreviewTests(unittest.TestCase):
   self.assertEqual(x["scored_count"],1)
   self.assertEqual(x["top30_count"],1)
   self.assertEqual(x["rows"][0]["global_score"],48)
-  self.assertEqual(x["rows"][1]["score_status"],"DATA_WAIT")
+  self.assertEqual(x["rows"][1]["score_status"],"NOT_ACQUIRED")
+  self.assertEqual(x["data_wait_count"],0)
+  self.assertEqual(x["not_acquired_count"],1)
   self.assertFalse(x["sheet_writes_performed"])
  def test_no_quality_proof_means_no_rank(self):
   snap=[{"ranking_run_id":RUN,"canonical_symbol":"BTC",
