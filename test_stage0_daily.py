@@ -38,5 +38,31 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(result["fmp_deferred_today"], 1)
         self.assertFalse(result["ranking_permitted"])
 
+    def test_precutoff_prioritizes_benchmark_and_user_critical_equities(self):
+        entries = [
+            {"symbol": "ZM", "route": "FMP_CANDIDATE"},
+            {"symbol": "TSLA", "route": "FMP_CANDIDATE"},
+            {"symbol": "SPY", "route": "FMP_CANDIDATE"},
+            {"symbol": "AAOI", "route": "FMP_CANDIDATE"},
+            {"symbol": "NVDA", "route": "FMP_CANDIDATE"},
+            {"symbol": "AAPL", "route": "FMP_CANDIDATE"},
+        ]
+        status = {"utc_date": "2026-10-14",
+                  "checkpoint": {"completed_symbols": []},
+                  "deferred_today": {},
+                  "fmp_quote_402_cooldowns": {},
+                  "quota": {"remaining": 240},
+                  "pending_reconciliation": False}
+        result = plan_from_universe(entries, status, batch_size=5)
+        self.assertEqual(result["next_symbols"], [
+            "SPY", "TSLA", "AAPL", "NVDA", "AAOI"
+        ])
+        status["fmp_quote_402_cooldowns"] = {"TSLA": "2026-10-19T00:00:00Z"}
+        result = plan_from_universe(entries, status, batch_size=5)
+        self.assertEqual(result["next_symbols"], [
+            "SPY", "AAPL", "NVDA", "AAOI", "ZM"
+        ])
+        self.assertEqual(result["fmp_http402_skipped_symbols"], ["TSLA"])
+
 if __name__ == "__main__":
     unittest.main()
