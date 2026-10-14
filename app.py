@@ -539,6 +539,40 @@ async def _run_fmp_equity_preclose_bootstrap_once():
             log.error("FMP_EQUITY_BOOTSTRAP_HALTED class=%s", type(exc).__name__)
 
 
+async def _run_fmp_preclose_drain_once():
+    """Operator-scoped one-day FMP Stage0 ingestion, no ranking/trades."""
+    import logging
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_fmp_preclose_drain import drain_fmp_preclose, DrainHalt
+    logger = logging.getLogger("uvicorn.error")
+    if os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() != "true":
+        logger.error("FMP_DRAIN_HALTED reason=STAGE0_DISABLED")
+        return
+    if provider.state is None:
+        logger.error("FMP_DRAIN_HALTED reason=REDIS_UNAVAILABLE")
+        return
+    batch = Stage0BatchCoordinator(provider.state)
+    try:
+        def step_log(status, symbol):
+            logger.info("FMP_DRAIN_STEP status=%s symbol=%s", status, symbol)
+        report = await drain_fmp_preclose(
+            status_fn=batch.status, plan_fn=stage0_daily_plan,
+            step_fn=stage0_daily_step, on_step=step_log,
+        )
+        logger.info(
+            "FMP_DRAIN_SUMMARY status=%s committed=%s deferred=%s count=%s "
+            "readback_required=true ranking_permitted=false",
+            report["status"], ",".join(report["committed"]) or "NONE",
+            ",".join(report["deferred"]) or "NONE",report.get("verified_count",0),
+        )
+    except DrainHalt as err:
+        logger.error("FMP_DRAIN_HALTED reason=%s", str(err))
+    except HTTPException as err:
+        logger.error("FMP_DRAIN_HALTED http=%s", err.status_code)
+    except Exception as err:
+        logger.error("FMP_DRAIN_HALTED error_class=%s", type(err).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -556,9 +590,18 @@ async def lifespan(app: FastAPI):
     equity_task = None
     if os.getenv("ASKLIAM_FMP_EQUITY_BOOTSTRAP_ONCE_DAY", "") == day_utc():
         equity_task = asyncio.create_task(_run_fmp_equity_preclose_bootstrap_once())
+    fmp_drain_task = None
+    if os.getenv("ASKLIAM_FMP_PRECLOSE_DRAIN_ONCE_DAY", "") == day_utc():
+        fmp_drain_task = asyncio.create_task(_run_fmp_preclose_drain_once())
     try:
         yield
     finally:
+        if fmp_drain_task is not None and not fmp_drain_task.done():
+            fmp_drain_task.cancel()
+            try:
+                await fmp_drain_task
+            except asyncio.CancelledError:
+                pass
         if equity_task is not None and not equity_task.done():
             equity_task.cancel()
             try:
