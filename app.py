@@ -801,7 +801,7 @@ async def stage0_auto_crypto_step(request: CryptoAutomaticStepRequest):
             "EXPLICIT_CONFIRMATION_REQUIRED",
         ) else 409 if exc.status in (
             "RECONCILIATION_REQUIRED", "ALREADY_COMMITTED_TODAY",
-            "CONCURRENT_RUN_BLOCKED", "CHECKPOINT_NOT_COMMITTED", "SNAPSHOT_COLLISION",
+            "CONCURRENT_RUN_BLOCKED", "CHECKPOINT_NOT_COMMITTED", "SNAPSHOT_COLLISION", "ALREADY_SPOT_ACQUIRED_TODAY",
         ) else 503
         raise HTTPException(code, {
             "stage0_status": exc.status,
@@ -862,7 +862,7 @@ async def stage0_crypto_commit_one(request: CryptoSingleCommitRequest):
             ) else
             409 if exc.status in (
                 "RECONCILIATION_REQUIRED", "CONCURRENT_RUN_BLOCKED",
-                "ALREADY_COMMITTED_TODAY", "SNAPSHOT_COLLISION",
+                "ALREADY_COMMITTED_TODAY", "SNAPSHOT_COLLISION", "ALREADY_SPOT_ACQUIRED_TODAY",
                 "CHECKPOINT_NOT_COMMITTED"
             ) else 503
         )
