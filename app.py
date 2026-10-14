@@ -486,9 +486,18 @@ async def lifespan(app: FastAPI):
     evidence_task = None
     if os.getenv("ASKLIAM_RUNTIME_EVIDENCE_ONCE_DAY", "") == day_utc():
         evidence_task = asyncio.create_task(_mirror_runtime_evidence_once())
+    stage1_task = None
+    if os.getenv("ASKLIAM_STAGE1_EVIDENCE_PROBE_ONCE_DAY", "") == day_utc():
+        stage1_task = asyncio.create_task(_stage1_evidence_probe_once())
     try:
         yield
     finally:
+        if stage1_task is not None and not stage1_task.done():
+            stage1_task.cancel()
+            try:
+                await stage1_task
+            except asyncio.CancelledError:
+                pass
         if evidence_task is not None and not evidence_task.done():
             evidence_task.cancel()
             try:
@@ -1526,3 +1535,92 @@ async def sync_live_stage0_evidence():
         raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
     except Exception:
         raise HTTPException(503, "STAGE0_EVIDENCE_SYNC_HALTED") from None
+
+# Stage1 is strictly a read-only analytical evidence bridge. No ranking
+# engine output, score proposal, portfolio or trade mutation is authorized.
+def _stage1_read_book_sync():
+    from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
+    probe = Stage0_Daily_Ingestor(providers={"stage1_read_only": lambda: {}})
+    book = probe._open()
+    result = {}
+    for tab in ("Universe", "Market_Data_Snapshot", "Data_Requirements"):
+        try:
+            result[tab] = book.worksheet(tab).get_all_records(
+                numericise_ignore=["all"],
+            )
+        except Exception as exc:
+            raise Stage0Error(
+                "SHEET_READ_FAILED", tab + ": " + type(exc).__name__
+            ) from None
+    return result
+
+
+@app.get("/stage1/evidence/read-only", dependencies=[Depends(require_token)])
+async def stage1_readonly_evidence(day: str | None = None):
+    """Live Sheets + Redis proof; never fabricate Global Score or write data."""
+    from datetime import date
+    from stage0_batch import pending_key
+    from stage0_crypto_coinbase_commit import spot_checkpoint_key
+    from stage0_ingestor import Stage0Error
+    from stage1_evidence_audit import audit_stage1_candidates, Stage1EvidenceError
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    today = day_utc()
+    day = day or today
+    try:
+        parsed = date.fromisoformat(day)
+        if parsed.isoformat() != day or day > today:
+            raise ValueError("invalid audit day")
+    except (ValueError, TypeError):
+        raise HTTPException(422, "INVALID_UTC_DAY") from None
+    run_id = "STAGE0-" + day.replace("-", "") + "-V6.5.1"
+    try:
+        raw_cp, pending = await asyncio.gather(
+            provider.state.call("GET", spot_checkpoint_key(day)),
+            provider.state.call("GET", pending_key(day)),
+        )
+        cp = json.loads(raw_cp) if raw_cp else None
+        rows = await asyncio.to_thread(_stage1_read_book_sync)
+        result = audit_stage1_candidates(
+            universe=rows["Universe"],
+            snapshots=rows["Market_Data_Snapshot"],
+            requirements=rows["Data_Requirements"],
+            run_id=run_id, spot_checkpoint=cp,
+            pending_reconciliation=bool(pending),
+            now=datetime.now(timezone.utc),
+        )
+        result["stage0_sheet_snapshot_independently_read"] = True
+        result["spot_checkpoint_checked_live"] = True
+        result["raw_ohlcv_fresh_rescan_performed"] = False
+        return result
+    except Stage1EvidenceError as exc:
+        raise HTTPException(409, {"stage1_status": str(exc)}) from None
+    except Stage0Error as exc:
+        raise HTTPException(503, {"stage1_status": exc.status}) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "STAGE1_EVIDENCE_HALTED") from None
+
+
+async def _stage1_evidence_probe_once():
+    """Exact-day startup evidence audit, observability only; no credentials logged."""
+    import logging
+    log = logging.getLogger("uvicorn.error")
+    try:
+        report = await stage1_readonly_evidence(day_utc())
+        log.info(
+            "STAGE1_EVIDENCE_AUDIT_PASS run_id=%s eligible=%s snapshots=%s "
+            "crypto_mandatory_ready=%s scored=%s ranking_committed=%s",
+            report["run_id"], report["eligible_universe_count"],
+            report["current_run_eligible_snapshot_count"],
+            ",".join(report["crypto_mandatory_ready_assets"]) or "NONE",
+            report["scored_assets"], report["ranked"],
+        )
+    except HTTPException as exc:
+        log.error("STAGE1_EVIDENCE_AUDIT_HALTED http=%s", exc.status_code)
+    except Exception as exc:
+        log.error(
+            "STAGE1_EVIDENCE_AUDIT_HALTED reason_class=%s",
+            type(exc).__name__,
+        )
