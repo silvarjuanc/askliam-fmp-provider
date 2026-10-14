@@ -357,7 +357,7 @@ async def _explicit_one_shot_coinbase_stage0():
     )
     from stage0_crypto_commit import crypto_checkpoint_key
     from stage0_ingestor import Stage0Error
-    logger = logging.getLogger("askliam.stage0.spot-once")
+    logger = logging.getLogger("uvicorn.error")
     today = datetime.now(timezone.utc).date().isoformat()
     if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") != today:
         return
