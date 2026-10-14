@@ -71,5 +71,38 @@ class ReaderTests(unittest.TestCase):
         self.assertFalse(result["ranking_permitted"])
         self.assertFalse(result["sheet_writes_performed"])
 
+    def test_daily_audit_loader_does_not_read_histories_or_write(self):
+        from stage1_sheet_reader import load_daily_audit
+        tabs={
+            "Universe":Worksheet(records=[
+                {"Symbol":"SPY","Asset Class":"Index",
+                 "Analysis Enabled":"TRUE","Ranking Enabled":"TRUE"},
+                {"Symbol":"JPM","Asset Class":"Equity",
+                 "Analysis Enabled":"TRUE","Ranking Enabled":"FALSE"},
+            ]),
+            "Data_Requirements":Worksheet(records=[
+                {"Model":"INDEX_V1","Broad Min %":"70",
+                 "Broad Mandatory Data":"last_price; macro_score"},
+                {"Model":"EQUITY_V2","Broad Min %":"70",
+                 "Broad Mandatory Data":"last_price; fundamental_factor_count>=1"},
+            ]),
+            "Market_Data_Snapshot":Worksheet(records=[
+                {"ranking_run_id":"STAGE0-20261014-V6.5.1",
+                 "canonical_symbol":"SPY","score_model":"INDEX_V1","last_price":"101",
+                 "data_timestamp":"2026-10-14T15:19:00Z"},
+                {"ranking_run_id":"STAGE0-20261014-V6.5.1",
+                 "canonical_symbol":"JPM","score_model":"EQUITY_V2","last_price":"120",
+                 "data_timestamp":"2026-10-14T15:19:00Z"},
+            ]),
+            "Raw_OHLCV":Worksheet(rows=[{"canonical_symbol":"SPY","source":"FMP"}]),
+        }
+        result=load_daily_audit(
+            day="2026-10-14",now=CURRENT,opener=lambda:Book(tabs))
+        self.assertEqual(result["stage0_snapshots"],2)
+        self.assertEqual(result["stage0_eligible_acquired"],1)
+        self.assertEqual(result["excluded_symbols"],["JPM"])
+        self.assertEqual(tabs["Raw_OHLCV"].calls,[])
+        self.assertFalse(result["sheet_writes_performed"])
+
 if __name__=="__main__":
     unittest.main()
