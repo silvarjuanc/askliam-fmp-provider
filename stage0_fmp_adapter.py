@@ -118,56 +118,25 @@ class ExistingFMPStage0Adapter:
         self.phase = "PROVIDER_REQUEST"
         with httpx.Client(timeout=90) as http:
             for index, symbol in enumerate(symbols):
-                # Quota optimization: verify mandatory quote access FIRST.
-                # If FMP Free returns 402, never waste a second call asking
-                # for historical data that cannot make this asset usable.
-                probe_response = http.post(
-                    self.base_url + "/enrich",
-                    headers={"X-Askliam-Token": self.token},
-                    json={
-                        "symbols": [symbol],
-                        "include_profiles": False,
-                        "include_historical": False,
-                        "historical_budget": 0,
-                    },
-                )
-                probe_response.raise_for_status()
-                self.phase = "PROVIDER_DECODE"
-                probe = probe_response.json()
-                probe_rows = probe.get("results", [])
-                if (
-                    probe.get("version") != "V6.5.1"
-                    or len(probe_rows) != 1
-                    or probe_rows[0].get("canonical_symbol") != symbol
-                ):
-                    raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
-                probe_row = probe_rows[0]
-                if probe_row.get("provider_errors"):
-                    raise RuntimeError(
-                        provider_failure_code(probe_row["provider_errors"])
-                    )
-                if (probe_row.get("fields") or {}).get("last_price") is None:
-                    raise RuntimeError("FMP_QUOTES_MISSING")
-                self.phase = "PROVIDER_REQUEST"
-
-                # Stage0 stores prices/history, NOT fundamental factors.
-                # Skip /profile until the separate fundamentals enrichment
-                # actually consumes those fields; missing fundamentals
-                # remain explicit and ranking_permitted remains FALSE.
+                # One /enrich call per symbol. The provider fetches quote and
+                # historical in the same response using separate quota tokens
+                # per actual FMP domain, eliminating the previous duplicate
+                # quote. 96 quote+historical instruments need ~192 calls
+                # rather than ~288 (profiles still separate, when supported).
+                want_history = index < self.historical_budget
                 response = http.post(
                     self.base_url + "/enrich",
                     headers={"X-Askliam-Token": self.token},
                     json={
                         "symbols": [symbol],
                         "include_profiles": False,
-                        "include_historical": index < self.historical_budget,
-                        "historical_budget": 1 if index < self.historical_budget else 0,
+                        "include_historical": want_history,
+                        "historical_budget": 1 if want_history else 0,
                     },
                 )
                 response.raise_for_status()
                 self.phase = "PROVIDER_DECODE"
                 output = response.json()
-                self.phase = "PROVIDER_REQUEST"
                 result_rows = output.get("results", [])
                 if (
                     output.get("version") != "V6.5.1"
@@ -175,8 +144,18 @@ class ExistingFMPStage0Adapter:
                     or result_rows[0].get("canonical_symbol") != symbol
                 ):
                     raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
-                records.extend(result_rows)
+                row = result_rows[0]
+                if row.get("provider_errors"):
+                    raise RuntimeError(
+                        provider_failure_code(row["provider_errors"])
+                    )
+                if (row.get("fields") or {}).get("last_price") is None:
+                    raise RuntimeError("FMP_QUOTES_MISSING")
+                if want_history and not (row.get("historical") or []):
+                    raise RuntimeError("FMP_HISTORICAL_EMPTY")
+                records.append(row)
                 quota = output.get("fmp_quota") or quota
+                self.phase = "PROVIDER_REQUEST"
         if len(records) != len(symbols):
             raise RuntimeError("PROVIDER_RESPONSE_CONTRACT_INVALID")
         self.phase = "TRANSFORM"
