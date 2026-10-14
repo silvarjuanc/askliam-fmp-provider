@@ -1831,3 +1831,26 @@ async def sync_live_stage0_evidence():
         raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
     except Exception:
         raise HTTPException(503, "STAGE0_EVIDENCE_SYNC_HALTED") from None
+
+
+@app.get("/stage1/history-preview", dependencies=[Depends(require_token)])
+async def stage1_history_preview(symbols: str):
+    """No-write Stage1 readiness check using cached historical observations.
+
+    Example: GET /stage1/history-preview?symbols=SPY,TSLA,AAPL,BTC,ETH
+    Restrict to <=10 canonical symbols and keep exact V6.5.1 contract.
+    Does not authorize Ranking, Lifecycle, orders or a Run_Manifest.
+    """
+    from stage1_sheet_reader import load_and_preview
+    tokens=[s.strip().upper() for s in symbols.split(",")]
+    if (not tokens or len(tokens)>10 or len(set(tokens))!=len(tokens) or
+        any(not SYMBOL_PATTERN.fullmatch(s) for s in tokens)):
+        raise HTTPException(422,"INVALID_STAGE1_SYMBOLS")
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
+        raise HTTPException(503,"STAGE1_SHEETS_NOT_CONFIGURED")
+    try:
+        return await asyncio.to_thread(load_and_preview,tokens)
+    except ValueError:
+        raise HTTPException(409,"STAGE1_PREVIEW_INPUT_INVALID") from None
+    except Exception:
+        raise HTTPException(503,"STAGE1_PREVIEW_READ_HALTED") from None
