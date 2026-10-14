@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 import pandas as pd
 from stage0_equity_session_gate import partition_confirmed_bars
+from stage0_fmp_eod_technicals import closed_session_factors, TECHNICAL_FIELDS
 
 
 def provider_failure_code(errors):
@@ -190,26 +191,43 @@ class ExistingFMPStage0Adapter:
             if result is None:
                 failed.append(f"{symbol}:MISSING_PROVIDER_RESULT")
                 continue
-            fields = result.get("fields") or {}
+            fields = dict(result.get("fields") or {})
             errors = result.get("provider_errors") or []
             success = result.get("enrichment_status") == "ACQUIRED_NOT_SCORED"
             urls = result.get("source_urls") or []
             source = ";".join(urls)
-            # Mandatory fields not yet synthesized must remain missing. This
-            # avoids false positives and mass DATA_WAIT.
-            missing = [
-                name for name in ("last_price", "return_1m", "return_3m", "volatility_20d",
-                                  "momentum_score", "trend_score", "relative_strength_score",
-                                  "volume_score", "macro_score", "fundamental_factor_count")
-                if fields.get(name) is None
-            ]
+            # The provider may calculate indicators from a live partial daily
+            # candle. Discard those technicals and recalculate ONLY from
+            # calendar-completed, validated FMP EOD OHLCV.
+            eod = closed_session_factors(
+                result.get("historical") or [], datetime.now(timezone.utc)
+            )
+            for name in (*TECHNICAL_FIELDS, "drawdown_pct",
+                         "distance_ma20_pct", "distance_ma50_pct",
+                         "distance_ma200_pct"):
+                fields.pop(name, None)
+            fields.update(eod["values"])
+            model = ("EQUITY_V2" if
+                     str(item.get("Asset Class", "")).strip().lower() == "equity"
+                     else "INDEX_V1")
+            required = (
+                ("last_price","return_1m","return_3m","volatility_20d",
+                 "momentum_score","trend_score","relative_strength_score",
+                 "volume_score","macro_score","fundamental_factor_count")
+                if model=="EQUITY_V2" else
+                ("last_price","return_1m","return_3m","volatility_20d",
+                 "momentum_score","trend_score","macro_score",
+                 "breadth_score_or_proxy")
+            )
+            # No synthetic macro, breadth, relative-strength or fundamentals.
+            missing=[name for name in required if fields.get(name) is None]
             if errors:
                 failed.append(f"{symbol}:{','.join(map(str, errors))}")
             snapshot = {
                 "ranking_run_id": self.run_id,
                 "canonical_symbol": symbol,
                 "asset_class": item.get("Asset Class", ""),
-                "score_model": "EQUITY_V2" if "equity" in str(item.get("Asset Class", "")).lower() else "INDEX_V1",
+                "score_model": model,
                 "data_timestamp": result.get("data_timestamp") or now,
                 "analysis_price_source": "FMP_STABLE" if fields.get("last_price") is not None else "",
                 "last_price": fields.get("last_price"),
@@ -221,10 +239,13 @@ class ExistingFMPStage0Adapter:
                 "return_12m": fields.get("return_12m"),
                 "volatility_20d": fields.get("volatility_20d"),
                 "volatility_60d": fields.get("volatility_60d"),
-                "drawdown_52w": fields.get("drawdown_pct"),
-                "distance_20dma": fields.get("distance_ma20_pct"),
-                "distance_50dma": fields.get("distance_ma50_pct"),
-                "distance_200dma": fields.get("distance_ma200_pct"),
+                "drawdown_52w": fields.get("drawdown_52w"),
+                "distance_20dma": fields.get("distance_20dma"),
+                "distance_50dma": fields.get("distance_50dma"),
+                "distance_200dma": fields.get("distance_200dma"),
+                "momentum_score": fields.get("momentum_score"),
+                "trend_score": fields.get("trend_score"),
+                "volume_score": fields.get("volume_score"),
                 "missing_mandatory_fields": "; ".join(missing),
                 "missing_optional_fields": "NOT_EVALUATED",
                 "source_summary": source,
@@ -232,15 +253,18 @@ class ExistingFMPStage0Adapter:
                 "mandatory_broad_pass": "FALSE",
                 "broad_readiness": "ENRICHMENT_PENDING",
                 "enrichment_status": "PROVIDER_DEFERRED" if (errors or not success) else "ENRICHMENT_PENDING",
-                "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
+                "notes": (
+                    "Stage0 EOD technicals: " + str(eod["technical_status"])
+                    + "; last_closed_session=" + str(eod["closed_session"] or "NONE")
+                    + "; rejected_incomplete_session=" + str(eod["in_session_rejected"])
+                    + "; mandatory false; macro/fundamental/breadth still unverified"
+                ),
             }
             quotes.append(snapshot)
             historical_counts[symbol] = 0
             # Never persist an unconfirmed in-session bar whose volume is
             # partial; previous historical observations remain untouched.
-            confirmed, dropped = partition_confirmed_bars(
-                (result.get("historical") or []), datetime.now(timezone.utc),
-            )
+            confirmed = eod["completed_candles"]
             for candle in sorted(
                 (b for b in confirmed if isinstance(b, dict) and b.get("date")),
                 key=lambda b: str(b["date"]),
