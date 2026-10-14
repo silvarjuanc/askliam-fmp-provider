@@ -321,7 +321,7 @@ def main() -> int:
         output = run(client, token)
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0 if output["status"] in (
-        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_NEW_YORK_PRECLOSE",
+        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS",
         "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN",
     ) else 1
 
