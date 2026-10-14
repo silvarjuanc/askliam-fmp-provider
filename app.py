@@ -588,6 +588,41 @@ async def _run_fmp_preclose_drain_once():
         logger.error("FMP_DRAIN_HALTED error_class=%s", type(err).__name__)
 
 
+async def _read_only_stage0_journal_once():
+    """Only describe Redis pending, and independently verify sheet footprint."""
+    import logging
+    from stage0_journal_diagnostic import summarize_pending_journal
+    log = logging.getLogger("uvicorn.error")
+    if provider.state is None:
+        log.error("STAGE0_JOURNAL_INSPECT_HALTED reason=REDIS_NOT_CONFIGURED")
+        return
+    try:
+        view = await summarize_pending_journal(provider.state)
+        log.info(
+            "STAGE0_JOURNAL_READONLY pending=%s status=%s symbols=%s "
+            "run_id=%s created_at=%s",
+            view["pending"], view["status"],
+            ",".join(view.get("symbols", [])) or "NONE",
+            view.get("run_id", "NONE"), view.get("created_at_utc", "NONE"),
+        )
+        if not view["pending"]:
+            return
+        from stage0_reconcile import inspect_abandoned_prewrite, public_inspection
+        review = public_inspection(
+            await inspect_abandoned_prewrite(provider.state)
+        )
+        log.info(
+            "STAGE0_JOURNAL_FOOTPRINT status=%s safe_prewrite_abort=%s "
+            "blockers=%s footprint=%s",
+            review.get("status"),
+            review.get("safe_to_abort_prewrite", False),
+            ",".join(review.get("blockers", [])) or "NONE",
+            json.dumps(review.get("footprint", {}),sort_keys=True),
+        )
+    except Exception as e:
+        log.error("STAGE0_JOURNAL_INSPECT_HALTED reason_class=%s",type(e).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -608,9 +643,18 @@ async def lifespan(app: FastAPI):
     fmp_drain_task = None
     if os.getenv("ASKLIAM_FMP_PRECLOSE_DRAIN_ONCE_DAY", "") == day_utc():
         fmp_drain_task = asyncio.create_task(_run_fmp_preclose_drain_once())
+    journal_task = None
+    if os.getenv("ASKLIAM_STAGE0_JOURNAL_INSPECT_ONCE_DAY", "") == day_utc():
+        journal_task = asyncio.create_task(_read_only_stage0_journal_once())
     try:
         yield
     finally:
+        if journal_task is not None and not journal_task.done():
+            journal_task.cancel()
+            try:
+                await journal_task
+            except asyncio.CancelledError:
+                pass
         if fmp_drain_task is not None and not fmp_drain_task.done():
             fmp_drain_task.cancel()
             try:
