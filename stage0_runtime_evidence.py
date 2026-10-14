@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timezone
 from math import isfinite
 
-from stage0_batch import Stage0BatchCoordinator, pending_key
+from stage0_batch import Stage0BatchCoordinator, pending_key, state_key
 from stage0_crypto_coinbase_commit import spot_checkpoint_key
 from stage0_crypto_coinbase_prepare import PRICE_SOURCE, MANDATORY
 from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
@@ -66,12 +66,41 @@ def _sheet_evidence_sync(proof):
             if not isfinite(value):
                 raise Stage0Error("VERIFICATION_FAILED", "Snapshot factor not finite")
 
+    fmp_verified = proof.get("fmp_verified", [])
+    if set(fmp_verified) & set(verified):
+        raise Stage0Error("VERIFICATION_FAILED", "Cross-provider duplicate current-day symbol")
+    for symbol in fmp_verified:
+        row = target.get(symbol)
+        if not row:
+            raise Stage0Error("VERIFICATION_FAILED", "Verified FMP snapshot missing")
+        timestamp = str(row.get("data_timestamp") or "")
+        source = str(row.get("source_summary") or "")
+        if (
+            row.get("analysis_price_source") != "FMP_STABLE"
+            or not timestamp.startswith(proof["day"])
+            or "financialmodelingprep.com/stable/" not in source
+        ):
+            raise Stage0Error("VERIFICATION_FAILED", "FMP snapshot provenance invalid")
+        try:
+            value = float(row.get("last_price", ""))
+        except (ValueError, TypeError):
+            raise Stage0Error("VERIFICATION_FAILED", "FMP price not numeric") from None
+        if not isfinite(value) or value <= 0:
+            raise Stage0Error("VERIFICATION_FAILED", "FMP price invalid")
+    # Acquisition evidence is NOT broad readiness. FMP price/history rows
+    # often lack mandatory technical, fundamental and macro factors.
+    acquired = sorted(set(fmp_verified) | set(verified))
+
     values = {
         "Live Evidence UTC Day": proof["day"],
         "Live Evidence Captured UTC": proof["timestamp"],
         "Live Redis FMP Used": str(proof["used"]),
         "Live Redis FMP Remaining": str(proof["remaining"]),
         "Live Coinbase Spot Verified": ",".join(verified) or "NONE",
+        "Live FMP Stage0 Verified": ",".join(fmp_verified) or "NONE",
+        "Live Stage0 Acquired Symbols": ",".join(acquired) or "NONE",
+        "Live Stage0 Unique Acquired": str(len(acquired)),
+        "Stage 0 Updated Assets": str(len(acquired)),
         "Live Stage0 Pending Reconciliation": "TRUE" if proof["pending"] else "FALSE",
         "Live Broad Mandatory Acquired": ",".join(verified) or "NONE",
         "Live Full Pipeline Status": "NOT_VERIFIED_STAGE0_ACQUISITION_ONLY",
@@ -119,7 +148,8 @@ def _sheet_evidence_sync(proof):
     if saved != values:
         raise Stage0Error("VERIFICATION_FAILED", "Runtime evidence read-back mismatch")
     return {"sync_status":"COMMITTED_VERIFY_PASS","snapshot_count":len(target),
-            "spot_verified":verified,"evidence_rows":len(values),
+            "spot_verified":verified,"fmp_verified":fmp_verified,
+            "unique_acquired":len(acquired),"evidence_rows":len(values),
             "ranking_permitted":False,"execution_permitted":False}
 
 
@@ -146,6 +176,26 @@ async def sync_stage0_evidence(redis):
                     raise ValueError("Invalid spot proof")
             except (ValueError, TypeError, KeyError):
                 raise Stage0Error("RECONCILIATION_REQUIRED","Invalid spot checkpoint") from None
+        fmp_raw = await redis.call("GET", state_key(day))
+        fmp_verified = []
+        if fmp_raw:
+            try:
+                fmp_cp = json.loads(fmp_raw)
+                fmp_verified = fmp_cp["completed_symbols"]
+                if (
+                    fmp_cp.get("version") != VERSION
+                    or fmp_cp.get("utc_date") != day
+                    or fmp_cp.get("status") != "COMMITTED_VERIFY_PASS"
+                    or not isinstance(fmp_verified, list)
+                    or len(fmp_verified) != len(set(fmp_verified))
+                    or any(not isinstance(x, str) or not x for x in fmp_verified)
+                    or any(x in spot for x in fmp_verified)
+                ):
+                    raise ValueError("Invalid FMP checkpoint")
+            except (ValueError, TypeError, KeyError):
+                raise Stage0Error(
+                    "RECONCILIATION_REQUIRED", "Invalid FMP checkpoint"
+                ) from None
         quota = await redis.quota()
         if quota.get("utc_date")!=day:
             raise Stage0Error("VALIDATION_FAILED","Quota day mismatch")
@@ -154,11 +204,15 @@ async def sync_stage0_evidence(redis):
             or used<0 or remain<0 or used+remain!=240):
             raise Stage0Error("VALIDATION_FAILED","Redis quota malformed")
         evidence={"day":day,"timestamp":now.isoformat(),
-                  "spot_verified":sorted(spot), "used":used, "remaining":remain,
+                  "spot_verified":sorted(spot),
+                  "fmp_verified":sorted(fmp_verified),
+                  "used":used, "remaining":remain,
                   "pending":pending}
         written=await asyncio.to_thread(_sheet_evidence_sync,evidence)
         return {"version":VERSION,**written,
                 "utc_day":day,"fmp_used":used,"fmp_remaining":remain,
-                "spot_verified":sorted(spot),"pending_reconciliation":pending}
+                "spot_verified":sorted(spot),
+                "fmp_verified":sorted(fmp_verified),
+                "pending_reconciliation":pending}
     finally:
         await batch.release(lease)
