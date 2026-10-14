@@ -156,6 +156,25 @@ def technicals(data: Any):
         m = ma(n)
         out[f"ma{n}"] = m
         out[f"distance_ma{n}_pct"] = 100*(closes[-1]/m-1) if m else None
+    # The Master Prompt's deterministic transforms are reusable on
+    # at least 253 verified CLOSED sessions; these are not Global Scores.
+    from stage0_canonical_factors import canonical_technicals, volume_score
+    if len(closes) >= 253:
+        try:
+            canonical = canonical_technicals(closes)
+        except (ValueError, TypeError):
+            canonical = {}
+        for field in ("momentum_score", "trend_score"):
+            if field in canonical:
+                out[field] = canonical[field]
+    if len(bars) >= 21:
+        volumes = [finite(b.get("volume")) for b in bars[-21:]]
+        if all(v is not None and v >= 0 for v in volumes) and all(
+            v > 0 for v in volumes[:-1]
+        ):
+            out["volume_score"] = volume_score(
+                volumes[-1], sum(volumes[:-1])/20, source_verified=True
+            )
     return {k:v for k,v in out.items() if v is not None}
 
 
@@ -325,9 +344,26 @@ class Provider:
                     })
                     if fields.get("market_cap") is None:
                         fields["market_cap"] = finite(v.get("marketCap") or v.get("mktCap"))
+            history_semantic_error = None
             if h and h["status"] == "READY":
-                fields.update(technicals(h["data"]))
+                # FMP daily history may contain the CURRENT session partial
+                # candle.  Mandatory technicals use only confirmed sessions.
+                from stage0_equity_session_gate import partition_confirmed_bars
+                raw_history = (
+                    h["data"] if isinstance(h["data"], list)
+                    else h["data"].get("historical", [])
+                    if isinstance(h["data"], dict) else []
+                )
+                try:
+                    confirmed, _ = partition_confirmed_bars(
+                        raw_history, datetime.now(timezone.utc)
+                    )
+                    fields.update(technicals(confirmed))
+                except (ValueError, TypeError, KeyError):
+                    history_semantic_error = "FMP_HISTORICAL_EMPTY"
             errors = [v["error"] for v in (q, p, h) if v and v.get("error")]
+            if history_semantic_error:
+                errors.append(history_semantic_error)
             if p and p["status"] == "READY" and errors_profile:
                 errors.append(errors_profile)
             rows.append({"canonical_symbol": symbol, "enrichment_status": "PROVIDER_DEFERRED" if errors else "ACQUIRED_NOT_SCORED",
