@@ -110,6 +110,51 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(len([x for x in calls if x[0] == "POST"]), 6)
         self.assertFalse(out["ranking_permitted"])
 
+    def test_spot_verified_btc_eth_do_not_halt_remaining_daily_run(self):
+        completed = {"ADA"}
+        spot = {"BTC", "ETH"}
+        last_symbol = "ADA"
+        last_digest = "f" * 64
+        run_id = "STAGE0-20261013-V6.5.1"
+        posts = []
+        def fake_request(client, method, path, token, *, json_body=None):
+            nonlocal last_symbol, last_digest
+            if path == "/stage0/auto/config":
+                return dict(version=VERSION, stage0_auto_enabled=True, crypto_auto_enabled=True,
+                            fmp_stage0_enabled=True, redis_configured=True,
+                            sheets_configured=True, manual_crypto_write_enabled=False)
+            if path == "/stage0/batch/status":
+                return dict(version=VERSION, utc_date="2026-10-13",pending_reconciliation=False,
+                            quota={"remaining":40, "blocked":False}, checkpoint={"completed_symbols":[]})
+            if path.startswith("/stage0/crypto/checkpoint"):
+                return dict(version=VERSION, utc_date="2026-10-13",
+                            completed_symbols=sorted(completed),
+                            spot_completed_symbols=sorted(spot),
+                            pending_reconciliation=False,
+                            last_verified_symbol=last_symbol,
+                            last_verified_run_id=run_id,
+                            last_verified_ohlcv_sha256=last_digest)
+            if path == "/stage0/auto/crypto-step":
+                symbol = json_body["symbol"]
+                self.assertNotIn(symbol, spot)
+                self.assertNotIn(symbol, completed)
+                posts.append(symbol)
+                completed.add(symbol)
+                last_symbol = symbol
+                last_digest = symbol * 16
+                return dict(version=VERSION, canonical_symbol=symbol,
+                            status="COMMITTED_VERIFY_PASS", run_id=run_id,
+                            daily_bars_expected=150, ohlcv_sha256=last_digest,
+                            ranking_permitted=False, execution_permitted=False)
+            raise AssertionError("Unexpected request: " + path)
+        with patch("scripts.stage0_daily_scheduler.request", new=fake_request):
+            result = run(object(), "secret", now=SUMMER, sleep=lambda _: None)
+        self.assertEqual(result["status"], "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED")
+        self.assertEqual(result["crypto_spot_previously_verified"], ["BTC", "ETH"])
+        self.assertEqual(result["crypto_previously_verified"], ["ADA", "BTC", "ETH"])
+        self.assertEqual(set(posts), set(CRYPTO)-{"ADA", "BTC", "ETH"})
+        self.assertEqual(result["fmp_stop_reason"], "FMP_QUOTA_RESERVE")
+
     def test_unsafe_crypto_error_halts_before_next_asset(self):
         calls = []
         def fake_request(client, method, path, token, *, json_body=None):
