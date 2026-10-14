@@ -739,6 +739,23 @@ async def _read_only_daily_audit_once():
             result["missing_snapshot_by_route"].get("OTHER",0),
             result["mandatory_complete_count"],
             result["eligible_quote_fresh_and_mandatory_count"])
+        # Independent live Redis/Upstash status, without exposing any secrets
+        # and without treating the Google Sheet runtime mirror as real-time.
+        try:
+            from stage0_batch import Stage0BatchCoordinator
+            live = await Stage0BatchCoordinator(provider.state).status()
+            if live.get("utc_date") != day or live.get("version") != VERSION:
+                raise ValueError("LIVE_REDATERM_MISMATCH")
+            quota=live.get("quota") or {}
+            logger.info(
+                "STAGE1_DAILY_AUDIT_REDIS_VERIFIED observed_at=%s "
+                "used=%s remaining=%s pending=%s completed_fmp=%s",
+                now_utc(),quota.get("used"),quota.get("remaining"),
+                bool(live.get("pending_reconciliation")),
+                len((live.get("checkpoint") or {}).get("completed_symbols") or []))
+        except Exception as exc:
+            logger.error("STAGE1_DAILY_AUDIT_REDIS_UNVERIFIED reason_class=%s",
+                         type(exc).__name__)
     except Exception as exc:
         logger.error("STAGE1_DAILY_AUDIT_HALTED exception_class=%s",type(exc).__name__)
 
