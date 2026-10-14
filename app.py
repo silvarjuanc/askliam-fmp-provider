@@ -1566,6 +1566,17 @@ async def stage0_daily_step():
         try:
             result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id)
         except Stage0Error as exc:
+            if exc.status == "SAFE_PREWRITE_RETRYABLE":
+                # Exact origin certified by Stage0_Daily_Ingestor.write_attempted.
+                # Journal is PREPARED and no Sheets write could have started.
+                # Temporarily hold this asset to let other symbols proceed,
+                # and retry during the next ingestion window.
+                await batch.mark_transient_prewrite([symbol], exc.detail, token)
+                return {"version": VERSION, "status": "SOURCE_RETRYABLE",
+                        "symbol": symbol, "reason": exc.detail,
+                        "temporarily_held": True, "retry_after_seconds": 1800,
+                        "checkpoint_advanced": False,
+                        "ranking_permitted": False}
             if exc.status == "PROVIDER_DEFERRED":
                 code = exc.detail.rsplit(": ", 1)[-1]
                 deferred_errors = {
