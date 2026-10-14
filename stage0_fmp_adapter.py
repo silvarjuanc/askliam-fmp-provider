@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 import pandas as pd
 from stage0_equity_session_gate import partition_confirmed_bars
+from stage0_fmp_technical_enrichment import derived_fmp_eod_factors, TechnicalEvidenceError
 
 
 def provider_failure_code(errors):
@@ -185,6 +186,22 @@ class ExistingFMPStage0Adapter:
         failed = []
         historical_counts = {}
         by_symbol = {str(row.get("canonical_symbol", "")).upper(): row for row in records}
+        # The canonical benchmark is the SPY FMP EOD historical series for the
+        # same final trading session, not a future quote or execution mark.
+        # Read only same-run FMP snapshots with explicit EOD evidence.
+        benchmark_return = None
+        benchmark_eod_date = None
+        for prior in snapshots:
+            if (str(prior.get("canonical_symbol","")).upper()=="SPY"
+                    and prior.get("ranking_run_id")==self.run_id
+                    and prior.get("analysis_price_source")=="FMP_STABLE"):
+                import re
+                match=re.search(r"last_confirmed_eod=(\\d{4}-\\d{2}-\\d{2})",str(prior.get("notes","")))
+                if match:
+                    try:
+                        benchmark_return=float(prior["return_3m"])
+                        benchmark_eod_date=match.group(1)
+                    except (TypeError,ValueError):pass
         for symbol, item in selected:
             result = by_symbol.get(symbol)
             if result is None:
@@ -195,6 +212,32 @@ class ExistingFMPStage0Adapter:
             success = result.get("enrichment_status") == "ACQUIRED_NOT_SCORED"
             urls = result.get("source_urls") or []
             source = ";".join(urls)
+            # Technical fields are derived ONLY from the FMP official EOD
+            # endpoint's complete, schema-validated daily candles.
+            technical_verified = False
+            eod_date = None
+            try:
+                computed=derived_fmp_eod_factors(
+                    result.get("historical"),datetime.now(timezone.utc),
+                    benchmark_return_3m=benchmark_return,
+                    benchmark_last_eod=benchmark_eod_date,
+                )
+                for key in ("return_1d","return_5d","return_1m","return_3m",
+                            "return_6m","return_12m","volatility_20d","volatility_60d",
+                            "momentum_score","trend_score","volume_score",
+                            "relative_strength_score"):
+                    if key in computed:fields[key]=computed[key]
+                for n in (20,50,200):
+                    fields[f"distance_ma{n}_pct"]=computed[f"distance_{n}dma"]
+                eod_date=computed["last_eod_date"]
+                technical_verified=True
+                if symbol=="SPY":
+                    benchmark_return=fields["return_3m"]
+                    benchmark_eod_date=eod_date
+            except TechnicalEvidenceError:
+                # The payload is still acquired as raw provider evidence, but
+                # NEVER treated as sufficient to compute missing technicals.
+                pass
             # Mandatory fields not yet synthesized must remain missing. This
             # avoids false positives and mass DATA_WAIT.
             missing = [
@@ -232,7 +275,12 @@ class ExistingFMPStage0Adapter:
                 "mandatory_broad_pass": "FALSE",
                 "broad_readiness": "ENRICHMENT_PENDING",
                 "enrichment_status": "PROVIDER_DEFERRED" if (errors or not success) else "ENRICHMENT_PENDING",
-                "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
+                "notes": (
+                    ("FMP EOD schema-validated technical indicators; " if technical_verified
+                     else "FMP EOD technical evidence incomplete; ")
+                    + ("last_confirmed_eod="+eod_date+"; " if eod_date else "")
+                    + "NO macro or fundamental scores implied; no ranking."
+                ),
             }
             quotes.append(snapshot)
             historical_counts[symbol] = 0
@@ -263,7 +311,8 @@ class ExistingFMPStage0Adapter:
                     "volume": candle.get("volume"),
                     "fetched_at_utc": now,
                     "upsert_key": f"{symbol}|{when}|FMP",
-                    "quality_status": "RECEIVED_UNVERIFIED",
+                    "quality_status": ("FMP_EOD_SCHEMA_VALIDATED_UNCROSSCHECKED"
+                                      if technical_verified else "RECEIVED_UNVERIFIED"),
                     "notes": "",
                 }
                 bars.append(row)
