@@ -588,6 +588,55 @@ async def _run_fmp_preclose_drain_once():
         logger.error("FMP_DRAIN_HALTED error_class=%s", type(err).__name__)
 
 
+async def _guarded_stage0_prewrite_recovery_once():
+    """One-day opt-in: abort ONLY proved unwritten abandoned FMP PREPARED journal."""
+    import logging
+    from stage0_reconcile import inspect_abandoned_prewrite, public_inspection
+    log = logging.getLogger("uvicorn.error")
+    if provider.state is None:
+        log.error("STAGE0_RECOVERY_AUDIT_HALTED reason=REDIS_UNAVAILABLE")
+        return
+    try:
+        report = await inspect_abandoned_prewrite(provider.state)
+        public = public_inspection(report)
+        pending = public.get("pending") or {}
+        symbols = pending.get("symbols") or []
+        log.info(
+            "STAGE0_RECOVERY_AUDIT status=%s symbol=%s journal_stage=%s "
+            "age_seconds=%s blockers=%s safe=%s",
+            public.get("status"), ",".join(symbols) or "NONE",
+            pending.get("status"), public.get("pending_age_seconds"),
+            ",".join(public.get("blockers") or []) or "NONE",
+            public.get("safe_to_abort_prewrite"),
+        )
+        if not report.get("safe_to_abort_prewrite"):
+            return
+        if (len(symbols)!=1
+                or str(pending.get("created_at",""))[:10] != day_utc()):
+            log.error("STAGE0_RECOVERY_HALTED reason=INVALID_EXACT_DAY_SCOPE")
+            return
+        from stage0_fmp_preclose_drain import preclose
+        if not preclose(datetime.now(timezone.utc)):
+            log.error("STAGE0_RECOVERY_HALTED reason=PRECLOSE_GATE_CLOSED")
+            return
+        decision = Stage0PrewriteRecoveryRequest(
+            symbol=symbols[0], run_id=pending["run_id"],
+            confirmation="ABORT_PREWRITE_ONLY_NO_SHEET_ROWS",
+        )
+        result = await stage0_reconciliation_abort_prewrite(decision)
+        if result.get("status") != "ABANDONED_PREWRITE_JOURNAL_ABORTED":
+            log.error("STAGE0_RECOVERY_HALTED reason=CAS_NOT_VERIFIED")
+            return
+        log.info("STAGE0_RECOVERY_SAFE_ABORT_PASS symbol=%s",symbols[0])
+        # The same idempotent and transactional daily writer resumes only
+        # AFTER an entirely separate Google Sheets/Redis safety readback.
+        await _run_fmp_preclose_drain_once()
+    except HTTPException as exc:
+        log.error("STAGE0_RECOVERY_HALTED http=%s",exc.status_code)
+    except Exception as exc:
+        log.error("STAGE0_RECOVERY_AUDIT_HALTED class=%s",type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -608,9 +657,18 @@ async def lifespan(app: FastAPI):
     fmp_drain_task = None
     if os.getenv("ASKLIAM_FMP_PRECLOSE_DRAIN_ONCE_DAY", "") == day_utc():
         fmp_drain_task = asyncio.create_task(_run_fmp_preclose_drain_once())
+    safe_recovery_task = None
+    if os.getenv("ASKLIAM_STAGE0_SAFE_RECOVER_THEN_DRAIN_ONCE_DAY", "") == day_utc():
+        safe_recovery_task = asyncio.create_task(_guarded_stage0_prewrite_recovery_once())
     try:
         yield
     finally:
+        if safe_recovery_task is not None and not safe_recovery_task.done():
+            safe_recovery_task.cancel()
+            try:
+                await safe_recovery_task
+            except asyncio.CancelledError:
+                pass
         if fmp_drain_task is not None and not fmp_drain_task.done():
             fmp_drain_task.cancel()
             try:
