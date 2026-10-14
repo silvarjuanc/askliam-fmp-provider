@@ -825,6 +825,34 @@ async def stage0_crypto_checkpoint(day: str, symbol: str = "BTC"):
         status["crypto_write_enabled"] = (
             os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true"
         )
+        # Native-perp and Coinbase spot checkpoints are independent. Expose a
+        # strictly validated spot completed set to the scheduled Stage0 driver
+        # so it skips BTC/ETH already fully enriched by Coinbase today.
+        from stage0_crypto_coinbase_commit import spot_checkpoint_key
+        from stage0_crypto_coinbase_prepare import PRICE_SOURCE
+        from stage0_crypto_probe import COINGECKO_IDS
+        raw_spot_cp = await provider.state.call("GET", spot_checkpoint_key(day))
+        if raw_spot_cp:
+            try:
+                spot_cp = json.loads(raw_spot_cp)
+                spot_completed = spot_cp["completed_symbols"]
+                if (
+                    spot_cp.get("version") != VERSION
+                    or spot_cp.get("utc_date") != day
+                    or spot_cp.get("provider") != PRICE_SOURCE
+                    or spot_cp.get("status") != "COMMITTED_VERIFY_PASS"
+                    or not isinstance(spot_completed, list)
+                    or len(set(spot_completed)) != len(spot_completed)
+                    or any(s not in COINGECKO_IDS for s in spot_completed)
+                ):
+                    raise ValueError("SPOT_CHECKPOINT_INVALID")
+            except (ValueError, KeyError, TypeError):
+                raise Stage0Error(
+                    "RECONCILIATION_REQUIRED", "Coinbase checkpoint invalid"
+                ) from None
+            status["spot_completed_symbols"] = sorted(spot_completed)
+        else:
+            status["spot_completed_symbols"] = []
         return status
     except Stage0Error as exc:
         code = 422 if exc.status in (
