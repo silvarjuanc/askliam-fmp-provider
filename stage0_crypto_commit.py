@@ -205,6 +205,30 @@ async def commit_one_native_perp(
     try:
         if await redis.call("GET", pending_key(day)):
             raise Stage0Error("RECONCILIATION_REQUIRED", "Global pending journal")
+        # A spot-first same-day ingestion already includes freshly observed
+        # funding and OI. Never overwrite its CRYPTO_V1 snapshot with the
+        # incomplete derivative-only snapshot (even via a sparse UPSERT).
+        from stage0_crypto_coinbase_commit import spot_checkpoint_key
+        spot_raw = await redis.call("GET", spot_checkpoint_key(day))
+        if spot_raw:
+            try:
+                spot_cp = json.loads(spot_raw)
+                if (
+                    spot_cp.get("version") != "V6.5.1"
+                    or spot_cp.get("utc_date") != day
+                    or spot_cp.get("status") != "COMMITTED_VERIFY_PASS"
+                    or not isinstance(spot_cp.get("completed_symbols"), list)
+                ):
+                    raise ValueError("Invalid Coinbase spot checkpoint")
+            except (ValueError, TypeError, AttributeError):
+                raise Stage0Error(
+                    "RECONCILIATION_REQUIRED", "Invalid Coinbase spot checkpoint"
+                ) from None
+            if symbol in spot_cp["completed_symbols"]:
+                raise Stage0Error(
+                    "ALREADY_SPOT_ACQUIRED_TODAY",
+                    "Spot CRYPTO_V1 snapshot already verified; derivative-only write blocked",
+                )
         stored = await redis.call("GET", crypto_checkpoint_key(day))
         if stored:
             try:

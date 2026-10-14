@@ -345,11 +345,101 @@ class Provider:
 
 provider = Provider()
 
+async def _explicit_one_shot_coinbase_stage0():
+    """Run only the operator-authorized BTC/ETH bootstrap on its exact UTC day.
+
+    Never runs during normal startups, on /health, or on schedule. Individual
+    Redis checkpoints make restart attempts idempotent. This is data-only.
+    """
+    import logging
+    from stage0_crypto_coinbase_commit import (
+        spot_preflight, spot_commit_one, confirm_spot,
+    )
+    from stage0_crypto_commit import crypto_checkpoint_key
+    from stage0_ingestor import Stage0Error
+    logger = logging.getLogger("askliam.stage0.spot-once")
+    today = datetime.now(timezone.utc).date().isoformat()
+    if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") != today:
+        return
+    symbols = os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_SYMBOLS", "")
+    if symbols != "BTC,ETH" or provider.state is None or provider.client is None:
+        logger.error("COINBASE_ONESHOT_BLOCKED: invalid scope or unavailable state")
+        return
+    if (os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_ENABLED", "").lower() != "true"
+        or os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_SYMBOL") != symbols
+        or os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_UTC_DAY") != today):
+        logger.error("COINBASE_ONESHOT_BLOCKED: scoped write permission absent")
+        return
+    for symbol in symbols.split(","):
+        try:
+            if datetime.now(timezone.utc).date().isoformat() != today:
+                logger.error("COINBASE_ONESHOT_HALTED: UTC_DAY_CHANGED")
+                return
+            # Skip an already readback-verified spot import. Read-only Redis.
+            from stage0_crypto_coinbase_commit import spot_checkpoint_key
+            stored = await provider.state.call("GET", spot_checkpoint_key(today))
+            if stored:
+                state = json.loads(stored)
+                if (state.get("version") != VERSION or state.get("utc_date") != today
+                    or state.get("status") != "COMMITTED_VERIFY_PASS"):
+                    logger.error("COINBASE_ONESHOT_HALTED: CHECKPOINT_INVALID")
+                    return
+                if symbol in state.get("completed_symbols", []):
+                    logger.info("COINBASE_ONESHOT_ALREADY_VERIFIED symbol=%s", symbol)
+                    continue
+            # No writing unless the provider payload and production sheet
+            # diff both pass a separate read-only preflight.
+            check = await spot_preflight(
+                symbol, redis=provider.state, client=provider.client,
+            )
+            logger.info(
+                "COINBASE_ONESHOT_PREFLIGHT_PASS symbol=%s raw_inserts=%s "
+                "raw_updates=%s snapshot_inserts=%s snapshot_updates=%s",
+                symbol, check["plans"]["Raw_OHLCV"]["inserts"],
+                check["plans"]["Raw_OHLCV"]["updates"],
+                check["plans"]["Market_Data_Snapshot"]["inserts"],
+                check["plans"]["Market_Data_Snapshot"]["updates"],
+            )
+            done = await spot_commit_one(
+                symbol, confirm_spot(symbol), redis=provider.state,
+                client=provider.client,
+            )
+            logger.info(
+                "COINBASE_ONESHOT_COMMIT_PASS symbol=%s status=%s "
+                "bars=%s run_id=%s",
+                symbol, done["status"], done["daily_bars"], done["run_id"],
+            )
+        except Stage0Error as exc:
+            logger.error(
+                "COINBASE_ONESHOT_HALTED symbol=%s code=%s detail=%s",
+                symbol, exc.status, exc.detail,
+            )
+            # A partial write may have happened. Stop until reconciled.
+            return
+        except Exception as exc:
+            logger.error(
+                "COINBASE_ONESHOT_HALTED symbol=%s error_class=%s",
+                symbol, type(exc).__name__,
+            )
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
-    yield
-    await provider.stop()
+    one_shot = None
+    if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
+        one_shot = asyncio.create_task(_explicit_one_shot_coinbase_stage0())
+    try:
+        yield
+    finally:
+        if one_shot is not None and not one_shot.done():
+            one_shot.cancel()
+            try:
+                await one_shot
+            except asyncio.CancelledError:
+                pass
+        await provider.stop()
 
 app = FastAPI(title="AskLiam FMP Enrichment Provider", version=VERSION, lifespan=lifespan)
 
@@ -801,7 +891,7 @@ async def stage0_auto_crypto_step(request: CryptoAutomaticStepRequest):
             "EXPLICIT_CONFIRMATION_REQUIRED",
         ) else 409 if exc.status in (
             "RECONCILIATION_REQUIRED", "ALREADY_COMMITTED_TODAY",
-            "CONCURRENT_RUN_BLOCKED", "CHECKPOINT_NOT_COMMITTED", "SNAPSHOT_COLLISION",
+            "CONCURRENT_RUN_BLOCKED", "CHECKPOINT_NOT_COMMITTED", "SNAPSHOT_COLLISION", "ALREADY_SPOT_ACQUIRED_TODAY",
         ) else 503
         raise HTTPException(code, {
             "stage0_status": exc.status,
@@ -862,7 +952,7 @@ async def stage0_crypto_commit_one(request: CryptoSingleCommitRequest):
             ) else
             409 if exc.status in (
                 "RECONCILIATION_REQUIRED", "CONCURRENT_RUN_BLOCKED",
-                "ALREADY_COMMITTED_TODAY", "SNAPSHOT_COLLISION",
+                "ALREADY_COMMITTED_TODAY", "SNAPSHOT_COLLISION", "ALREADY_SPOT_ACQUIRED_TODAY",
                 "CHECKPOINT_NOT_COMMITTED"
             ) else 503
         )
@@ -1206,3 +1296,117 @@ async def stage0_check():
             "version": VERSION, "status": "CHECK_FAILED",
             "code": type(exc).__name__,
         }) from None
+
+# Coinbase spot ingestion is separated from existing native-perp checkpoints.
+# All writes disabled unless explicitly scoped in Render and authenticated.
+class CoinbaseSpotCommitRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+    confirmation: str = Field(min_length=8, max_length=100)
+
+
+@app.get("/stage0/crypto/coinbase-spot-ingest-preflight", dependencies=[Depends(require_token)])
+async def coinbase_spot_ingest_preflight(symbol: str):
+    """Real source + Sheets diff, but NO writes, checkpoint or ranking."""
+    from stage0_crypto_coinbase_commit import spot_preflight
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        return await spot_preflight(symbol.strip().upper(), redis=provider.state, client=provider.client)
+    except Stage0Error as exc:
+        raise HTTPException(409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "SPOT_SNAPSHOT_COLLISION"
+        ) else 503, {
+            "stage0_status": exc.status,
+            "sheet_writes_performed": False, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "COINBASE_SPOT_PREFLIGHT_HALTED") from None
+
+
+@app.post("/stage0/crypto/coinbase-spot-commit-one", dependencies=[Depends(require_token)])
+async def coinbase_spot_commit_one(request: CoinbaseSpotCommitRequest):
+    """Explicit, scoped opt-in transaction. Never ranks or places orders."""
+    from stage0_crypto_coinbase_commit import spot_commit_one
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        return await spot_commit_one(
+            request.symbol, request.confirmation,
+            redis=provider.state, client=provider.client,
+        )
+    except Stage0Error as exc:
+        http = 403 if exc.status in (
+            "SPOT_WRITE_DISABLED", "SPOT_WRITE_SCOPE_DENIED",
+            "EXPLICIT_CONFIRMATION_REQUIRED"
+        ) else 409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "SPOT_SNAPSHOT_COLLISION",
+            "ALREADY_COMMITTED_TODAY", "CONCURRENT_RUN_BLOCKED",
+            "CHECKPOINT_NOT_COMMITTED",
+        ) else 503
+        raise HTTPException(http, {
+            "stage0_status": exc.status, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, {
+            "stage0_status": "SPOT_COMMIT_HALTED",
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+
+
+@app.get("/stage0/crypto/coinbase-spot-checkpoint", dependencies=[Depends(require_token)])
+async def coinbase_spot_checkpoint(day: str, symbol: str):
+    """Independent Redis-only spot checkpoint reader; no provider calls."""
+    from stage0_crypto_coinbase_commit import spot_checkpoint_key
+    from stage0_crypto_coinbase_prepare import PRICE_SOURCE
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_batch import pending_key
+    from datetime import date
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        parsed = date.fromisoformat(day)
+        canonical = symbol.strip().upper()
+        if (
+            day != parsed.isoformat() or parsed > datetime.now(timezone.utc).date()
+            or canonical not in COINGECKO_IDS
+        ):
+            raise ValueError("Invalid day or symbol")
+    except (ValueError, TypeError):
+        raise HTTPException(422, "INVALID_DATE_OR_SYMBOL") from None
+    try:
+        raw = await provider.state.call("GET", spot_checkpoint_key(day))
+        pending = await provider.state.call("GET", pending_key(day))
+        if raw:
+            cp = json.loads(raw)
+            if (
+                cp.get("version") != VERSION or cp.get("utc_date") != day
+                or cp.get("provider") != PRICE_SOURCE
+                or cp.get("status") != "COMMITTED_VERIFY_PASS"
+                or not isinstance(cp.get("completed_symbols"), list)
+            ):
+                raise ValueError("Invalid stored spot checkpoint")
+            completed = cp["completed_symbols"]
+        else:
+            completed, cp = [], {}
+        return {
+            "version": VERSION, "utc_date": day, "symbol": canonical,
+            "status": cp.get("status", "NOT_FOUND"),
+            "symbol_completed": canonical in completed,
+            "symbol_checkpoint_verified": canonical in completed and not bool(pending),
+            "pending_reconciliation": bool(pending),
+            "last_verified_run_id": cp.get("last_verified_run_id"),
+            "sheet_writes_performed": False, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(409, "SPOT_CHECKPOINT_INVALID") from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
