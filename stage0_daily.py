@@ -10,6 +10,17 @@ from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
 
 ELIGIBLE_FMP_CLASSES = {"equity", "index", "fixed income etf", "index / etf / basket"}
 
+# Canonical benchmark, explicitly requested symbols and active watchlist US
+# large caps take precedence over alphabetic queue order. This affects ONLY
+# ingestion order; it never awards scoring points or authorizes trades.
+FMP_PRECLOSE_PRIORITY = (
+    "SPY", "TSLA", "AAPL", "NVDA", "MSFT", "META", "AMD", "QQQ",
+    "AMZN", "GOOGL", "TSM", "PLTR", "COIN", "TLT", "XLE", "IWM",
+    "SMH", "EWJ", "EWZ", "EWY", "EWT",
+)
+FMP_PRIORITY_RANK = {symbol: i for i, symbol in enumerate(FMP_PRECLOSE_PRIORITY)}
+
+
 def classify(asset_class):
     name = str(asset_class or "").strip().lower()
     if name in ELIGIBLE_FMP_CLASSES:
@@ -84,6 +95,9 @@ def plan_from_universe(entries, status, *, batch_size=1):
     unattempted = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
     cooldown_skipped = [symbol for symbol in unattempted if symbol in blocked_402]
     pending = [symbol for symbol in unattempted if symbol not in blocked_402]
+    # Repeated Stage0 steps consume a verified Redis checkpoint. The order
+    # MUST remain deterministic even if Universe/Sheets change row order.
+    pending.sort(key=lambda s: (FMP_PRIORITY_RANK.get(s, len(FMP_PRIORITY_RANK)), s))
     return {
         "version": "V6.5.1",
         "utc_date": status["utc_date"],
