@@ -568,7 +568,22 @@ async def _run_fmp_preclose_drain_once():
     except DrainHalt as err:
         logger.error("FMP_DRAIN_HALTED reason=%s", str(err))
     except HTTPException as err:
-        logger.error("FMP_DRAIN_HALTED http=%s", err.status_code)
+        details = err.detail
+        if isinstance(details, dict):
+            code = str(details.get("stage0_status") or "HTTP_ERROR")
+        else:
+            code = "HTTP_ERROR"
+        # Never log user/sheet provider payloads or secret-bearing descriptions.
+        allowed = {
+            "RECONCILIATION_REQUIRED", "SHEET_PREFLIGHT_UNAVAILABLE",
+            "SHEET_WRITE_FAILED", "SHEET_READ_FAILED", "SOURCE_RETRYABLE",
+            "FMP_QUOTA_GUARD", "CHECKPOINT_NOT_COMMITTED",
+            "CONCURRENT_RUN_BLOCKED", "STAGE0_DISABLED",
+            "HALTED", "VERIFICATION_FAILED", "STORAGE_UNAVAILABLE",
+            "SCHEMA_FAILED", "PROVIDER_DEFERRED", "DATA_VALIDATION_FAILED",
+        }
+        code = code if code in allowed else "UNCLASSIFIED_HTTP_ERROR"
+        logger.error("FMP_DRAIN_HALTED http=%s stage0_status=%s", err.status_code, code)
     except Exception as err:
         logger.error("FMP_DRAIN_HALTED error_class=%s", type(err).__name__)
 
