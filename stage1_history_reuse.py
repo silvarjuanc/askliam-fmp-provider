@@ -93,6 +93,9 @@ def validate_candles(symbol, model, rows, now):
     source, by_day = ranked[0]
     bars = [by_day[day] for day in sorted(by_day)]
     latest = bars[-1]["date"]
+    last_date = datetime.strptime(latest, "%Y-%m-%d").date()
+    history_age_days = (now.date() - last_date).days
+    history_fresh = history_age_days <= (2 if model == "CRYPTO_V1" else 4)
     if bad:
         return {"status":"HISTORY_CONFLICT_OR_INVALID", "source":source,
                 "observations":len(bars), "last_session":latest,
@@ -123,6 +126,7 @@ def validate_candles(symbol, model, rows, now):
         if volume is not None:
             scores["volume_score"] = volume
     return {"status":"TECHNICAL_FACTORS_RECOMPUTED", "source":source,
+            "history_age_days":history_age_days, "history_fresh":history_fresh,
             "source_quality_status":quality, "source_quality_verified":validated,
             "observations":len(bars),"last_session":latest,"errors":[],
             "factors":{**tech,**scores}}
@@ -180,7 +184,9 @@ def preview(run_id, symbols, snapshots, requirements, raw_rows, *,
         timestamp = parse_utc(row.get("data_timestamp"))
         quote_age = (now-timestamp).total_seconds() if timestamp else None
         fresh = quote_age is not None and 0<=quote_age<=QUOTE_TTL_SECONDS
-        supported = history.get("status")=="TECHNICAL_FACTORS_RECOMPUTED" and history.get("source_quality_verified") is True
+        supported = (history.get("status")=="TECHNICAL_FACTORS_RECOMPUTED"
+                     and history.get("history_fresh") is True
+                     and history.get("source_quality_verified") is True)
         # Even an apparently complete field set cannot rank with stale price
         # or unverified source. This endpoint is PREVIEW-only in any case.
         results.append({
@@ -189,6 +195,7 @@ def preview(run_id, symbols, snapshots, requirements, raw_rows, *,
             "history_source":history.get("source"),
             "history_observations":history.get("observations",0),
             "history_last_session":history.get("last_session"),
+            "history_fresh":history.get("history_fresh", False),
             "source_quality_status":history.get("source_quality_status","UNKNOWN"),
             "canonical_technical_factors":{k:factors[k] for k in (
                 "return_1m","return_3m","volatility_20d",
