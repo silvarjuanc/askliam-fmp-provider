@@ -1024,6 +1024,24 @@ async def stage0_independent_spot_preview(symbol: str):
         }) from None
 
 
+@app.get("/stage0/crypto/coinbase-spot-preview", dependencies=[Depends(require_token)])
+async def stage0_coinbase_spot_preview(symbol: str):
+    """Validated exchange spot OHLCV source preview, read only."""
+    from stage0_crypto_coinbase_spot import probe_spot, CoinbaseSpotError
+    if provider.client is None:
+        raise HTTPException(503, {"stage0_status":"SOURCE_UNAVAILABLE"})
+    try:
+        return await probe_spot(symbol, provider.client)
+    except CoinbaseSpotError as exc:
+        status = 429 if str(exc) == "COINBASE_RATE_LIMIT" else 503
+        raise HTTPException(status, {
+            "stage0_status":str(exc),
+            "ranking_permitted":False,
+            "execution_permitted":False,
+            "sheet_writes_performed":False,
+        }) from None
+
+
 @app.get("/stage0/crypto/spot-ohlcv-preview", dependencies=[Depends(require_token)])
 async def stage0_spot_ohlcv_preview(symbol: str):
     """Independent daily spot OHLCV quality probe; no sheets or scoring writes."""
