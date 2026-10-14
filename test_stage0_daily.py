@@ -64,5 +64,28 @@ class CoverageTests(unittest.TestCase):
         ])
         self.assertEqual(result["fmp_http402_skipped_symbols"], ["TSLA"])
 
+    def test_ge_explicit_one_day_quarantine_does_not_mark_provider_deferred(self):
+        from unittest.mock import patch
+        items=[{"symbol":"GE","route":"FMP_CANDIDATE"},
+               {"symbol":"COST","route":"FMP_CANDIDATE"},
+               {"symbol":"CVX","route":"FMP_CANDIDATE"},
+               {"symbol":"HIMS","route":"FMP_CANDIDATE"}]
+        state={"utc_date":"2026-10-14",
+               "checkpoint":{"completed_symbols":["COST","CVX"]},
+               "deferred_today":{},
+               "fmp_quote_402_cooldowns":{},
+               "quota":{"remaining":130},
+               "pending_reconciliation":False}
+        with patch.dict("os.environ",{"ASKLIAM_STAGE0_QUARANTINE_GE_UTC_DAY":"2026-10-14"}):
+            plan=plan_from_universe(items,state)
+            self.assertEqual(plan["next_symbols"],["HIMS"])
+            self.assertEqual(plan["fmp_operationally_held_symbols"],["GE"])
+            self.assertEqual(plan["fmp_deferred_today"],0)
+            self.assertEqual(plan["fmp_completed_today"],2)
+            state["utc_date"]="2026-10-15"
+            tomorrow=plan_from_universe(items,state)
+            self.assertEqual(tomorrow["fmp_operationally_held_symbols"],[])
+            self.assertEqual(tomorrow["next_symbols"],["GE"])
+
 if __name__ == "__main__":
     unittest.main()
