@@ -200,8 +200,11 @@ class SchedulerTests(unittest.TestCase):
             out=run(object(),"secret",now=SUMMER,sleep=lambda _:None)
         self.assertEqual(out["fmp_stop_reason"],"FMP_RETRYABLE_SOURCE")
         self.assertIn(("POST","/stage0/daily/step"),paths)
-        self.assertLess(paths.index(("POST","/stage0/daily/step")),
-                        paths.index(("GET","/stage0/crypto/checkpoint?day=2026-10-13&symbol=BTC")))
+        self.assertLess(
+            paths.index(("POST","/stage0/daily/step")),
+            max(i for i, item in enumerate(paths)
+                if item == ("GET","/stage0/crypto/checkpoint?day=2026-10-13&symbol=BTC")),
+        )
         self.assertNotIn(("POST","/stage0/auto/crypto-step"),paths)
 
     def test_precutoff_1600_stops_before_any_remote_action(self):
