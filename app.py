@@ -454,6 +454,27 @@ async def _explicit_coinbase_reconcile_then_bootstrap():
     await _explicit_one_shot_coinbase_stage0()
 
 
+async def _mirror_runtime_evidence_once():
+    """Operator-scoped one-day evidence bridge for the connected Sheet reader."""
+    import logging
+    from stage0_runtime_evidence import sync_stage0_evidence
+    log = logging.getLogger("uvicorn.error")
+    try:
+        if provider.state is None:
+            log.error("STAGE0_EVIDENCE_SYNC_HALTED code=REDIS_UNAVAILABLE")
+            return
+        result = await sync_stage0_evidence(provider.state)
+        log.info(
+            "STAGE0_EVIDENCE_SYNC_PASS day=%s fmp_used=%s fmp_remaining=%s "
+            "spot_verified=%s readback=%s",
+            result["utc_day"], result["fmp_used"], result["fmp_remaining"],
+            ",".join(result["spot_verified"]) or "NONE", result["sync_status"],
+        )
+    except Exception as err:
+        status = getattr(err,"status",type(err).__name__)
+        log.error("STAGE0_EVIDENCE_SYNC_HALTED code=%s", status)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -462,9 +483,18 @@ async def lifespan(app: FastAPI):
         one_shot = asyncio.create_task(_explicit_coinbase_reconcile_then_bootstrap())
     elif os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
         one_shot = asyncio.create_task(_explicit_one_shot_coinbase_stage0())
+    evidence_task = None
+    if os.getenv("ASKLIAM_RUNTIME_EVIDENCE_ONCE_DAY", "") == day_utc():
+        evidence_task = asyncio.create_task(_mirror_runtime_evidence_once())
     try:
         yield
     finally:
+        if evidence_task is not None and not evidence_task.done():
+            evidence_task.cancel()
+            try:
+                await evidence_task
+            except asyncio.CancelledError:
+                pass
         if one_shot is not None and not one_shot.done():
             one_shot.cancel()
             try:
@@ -1470,3 +1500,29 @@ async def coinbase_spot_checkpoint(day: str, symbol: str):
         raise HTTPException(409, "SPOT_CHECKPOINT_INVALID") from None
     except StorageError:
         raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+
+
+@app.post("/stage0/auto/runtime-evidence-sync", dependencies=[Depends(require_token)])
+async def sync_live_stage0_evidence():
+    """Authorized non-secret mirror into FMP_Runtime_State only.
+
+    It does not change Ranking/Run_Manifest/Lifecycle/AI Trades.
+    """
+    from stage0_runtime_evidence import sync_stage0_evidence
+    from stage0_ingestor import Stage0Error
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        return await sync_stage0_evidence(provider.state)
+    except Stage0Error as exc:
+        http=409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "CONCURRENT_RUN_BLOCKED"
+        ) else 503
+        raise HTTPException(http, {
+            "stage0_status":exc.status, "ranking_permitted":False,
+            "execution_permitted":False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "STAGE0_EVIDENCE_SYNC_HALTED") from None

@@ -90,6 +90,9 @@ class SchedulerTests(unittest.TestCase):
                             last_verified_symbol=last_symbol,
                             last_verified_run_id=run_id,
                             last_verified_ohlcv_sha256=last_digest)
+            if path == "/stage0/auto/runtime-evidence-sync":
+                return dict(version=VERSION, sync_status="COMMITTED_VERIFY_PASS",
+                            spot_verified=[], fmp_used=200, fmp_remaining=40)
             if path == "/stage0/auto/crypto-step":
                 symbol=json_body["symbol"]
                 self.assertNotIn(symbol, completed)
@@ -107,7 +110,8 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(set(out["crypto_verified"]), set(CRYPTO)-{"ADA","BTC"})
         self.assertEqual(out["crypto_previously_verified"], ["ADA","BTC"])
         self.assertEqual(out["fmp_stop_reason"], "FMP_QUOTA_RESERVE")
-        self.assertEqual(len([x for x in calls if x[0] == "POST"]), 6)
+        self.assertEqual(len([x for x in calls if x[0] == "POST" and x[1]=="/stage0/auto/crypto-step"]), 6)
+        self.assertEqual(len([x for x in calls if x[1]=="/stage0/auto/runtime-evidence-sync"]), 1)
         self.assertFalse(out["ranking_permitted"])
 
     def test_spot_verified_btc_eth_do_not_halt_remaining_daily_run(self):
@@ -134,6 +138,9 @@ class SchedulerTests(unittest.TestCase):
                             last_verified_symbol=last_symbol,
                             last_verified_run_id=run_id,
                             last_verified_ohlcv_sha256=last_digest)
+            if path == "/stage0/auto/runtime-evidence-sync":
+                return dict(version=VERSION, sync_status="COMMITTED_VERIFY_PASS",
+                            spot_verified=["BTC","ETH"], fmp_used=200, fmp_remaining=40)
             if path == "/stage0/auto/crypto-step":
                 symbol = json_body["symbol"]
                 self.assertNotIn(symbol, spot)
