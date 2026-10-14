@@ -123,6 +123,7 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         "status": "RUNNING",
         "crypto_verified": [],
         "crypto_previously_verified": [],
+        "crypto_spot_previously_verified": [],
         "crypto_provider_deferred": [],
         "fmp_verified": [],
         "fmp_deferred": [],
@@ -147,8 +148,9 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
             raise SchedulerHalt("MANUAL_CRYPTO_WRITE_STILL_ENABLED")
         assert_state(client, token, day)
         cp = crypto_checkpoint(client, token, day)
-        existing = set(cp.get("completed_symbols") or [])
-        if not existing.issubset(CRYPTO):
+        native_existing = set(cp.get("completed_symbols") or [])
+        spot_existing = set(cp.get("spot_completed_symbols") or [])
+        if not native_existing.issubset(CRYPTO) or not spot_existing.issubset(CRYPTO):
             raise SchedulerHalt("INVALID_CRYPTO_CHECKPOINT")
 
         # Native-perpetual history and derivatives context are reference-only.
@@ -159,9 +161,14 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
                 break
             assert_state(client, token, day)
             cp = crypto_checkpoint(client, token, day)
-            existing = set(cp.get("completed_symbols") or [])
-            if symbol in existing:
+            native_existing = set(cp.get("completed_symbols") or [])
+            spot_existing = set(cp.get("spot_completed_symbols") or [])
+            if not native_existing.issubset(CRYPTO) or not spot_existing.issubset(CRYPTO):
+                raise SchedulerHalt("INVALID_CRYPTO_CHECKPOINT")
+            if symbol in native_existing or symbol in spot_existing:
                 result["crypto_previously_verified"].append(symbol)
+                if symbol in spot_existing:
+                    result["crypto_spot_previously_verified"].append(symbol)
                 continue
             try:
                 commit = request(client, "POST", "/stage0/auto/crypto-step",
