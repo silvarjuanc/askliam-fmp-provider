@@ -90,6 +90,7 @@ def plan_from_universe(entries, status, *, batch_size=1):
     completed = set(status["checkpoint"].get("completed_symbols") or [])
     deferred = set(status.get("deferred_today") or {})
     blocked_402 = set(status.get("fmp_quote_402_cooldowns") or {})
+    temporarily_held = set(status.get("transient_prewrite_today") or {})
     # Operator-scoped 2026-10-14 quarantine ONLY for GE: a provider/workbook
     # step halted with HTTP 503 and left a PREPARED journal. The journal was
     # separately reconciled with 300 immutable legacy rows and no same-day
@@ -104,7 +105,8 @@ def plan_from_universe(entries, status, *, batch_size=1):
     eligible = [item["symbol"] for item in entries if item["route"] == "FMP_CANDIDATE"]
     unattempted = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
     cooldown_skipped = [symbol for symbol in unattempted if symbol in blocked_402]
-    pending = [symbol for symbol in unattempted if symbol not in blocked_402 and symbol not in held]
+    pending = [symbol for symbol in unattempted if symbol not in blocked_402
+               and symbol not in held and symbol not in temporarily_held]
     # Repeated Stage0 steps consume a verified Redis checkpoint. The order
     # MUST remain deterministic even if Universe/Sheets change row order.
     pending.sort(key=lambda s: (FMP_PRIORITY_RANK.get(s, len(FMP_PRIORITY_RANK)), s))
@@ -121,6 +123,10 @@ def plan_from_universe(entries, status, *, batch_size=1):
         "fmp_unattempted_today_including_cooldowns": len(unattempted),
         "fmp_http402_cooldown_count": len(set(eligible) & blocked_402),
         "fmp_http402_skipped_today": len(cooldown_skipped),
+        "fmp_transient_prewrite_held_symbols": sorted(
+            temporarily_held & set(unattempted)
+        ),
+        "fmp_transient_prewrite_held_count": len(temporarily_held & set(unattempted)),
         "fmp_http402_skipped_symbols": cooldown_skipped,
         "fmp_operationally_held_symbols": sorted(held & set(unattempted)),
         "fmp_operational_hold_reason": ("GE_PRIOR_PREWRITE_503_RECONCILED"
