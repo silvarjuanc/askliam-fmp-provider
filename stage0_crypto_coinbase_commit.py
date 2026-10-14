@@ -41,8 +41,14 @@ def spot_write_guard(symbol: str, confirmation: str) -> None:
         raise Stage0Error("SPOT_WRITE_DISABLED", "Explicit feature flag required")
     if symbol not in COINGECKO_IDS or confirmation != confirm_spot(symbol):
         raise Stage0Error("EXPLICIT_CONFIRMATION_REQUIRED", "Invalid scoped confirmation")
+    # Deliberately bounded UTC-day cohort, used for an explicitly authorized
+    # one-off startup batch; never a wildcard. Manual mode remains 1-symbol.
+    scope = os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_SYMBOL", "").strip().upper().split(",")
+    scope = [x.strip() for x in scope]
     if (
-        os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_SYMBOL", "").strip().upper() != symbol
+        symbol not in scope or len(scope) > 2
+        or any(s not in ("BTC", "ETH") for s in scope)
+        or len(set(scope)) != len(scope)
         or os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_UTC_DAY", "").strip()
         != datetime.now(timezone.utc).date().isoformat()
     ):
