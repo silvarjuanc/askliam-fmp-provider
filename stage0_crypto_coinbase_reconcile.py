@@ -112,13 +112,8 @@ def validated_saved_spot(saved: dict, payload, *, symbol: str, run_id: str,
 
 
 def readback_all_sheets():
-    return Stage0_Daily_Ingestor(
-        providers={"readback_only": lambda: {}}
-    )._capture(
-        Stage0_Daily_Ingestor(
-            providers={"readback_only": lambda: {}}
-        )._open()
-    )
+    reader = Stage0_Daily_Ingestor(providers={"readback_only": lambda: {}})
+    return reader._capture(reader._open())
 
 
 async def reconcile_after_readback_error(*, redis, client: httpx.AsyncClient) -> dict:
