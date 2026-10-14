@@ -76,6 +76,9 @@ class Stage0_Daily_Ingestor:
         self.credentials_env = credentials_env
         self.max_batch_cells = max_batch_cells
         self.max_append_rows = max_append_rows
+        # True from immediately before FIRST possible Sheets mutation.
+        # Only the false state can authorize automatic PREWRITE abort.
+        self.write_attempted = False
         if not self.spreadsheet_id:
             raise Stage0Error("CONFIGURATION_FAILED", "ASKLIAM_SPREADSHEET_ID is missing")
         if not self.providers or not all(callable(p) for p in self.providers.values()):
@@ -400,6 +403,7 @@ class Stage0_Daily_Ingestor:
         if not _RUN_GUARD.acquire(blocking=False):
             raise Stage0Error("CONCURRENT_RUN_BLOCKED", "Stage 0 already executing")
         committed = False
+        self.write_attempted = False
         try:
             before = self._capture(self._open())
             before_hash = self._fingerprint(before)
@@ -411,6 +415,7 @@ class Stage0_Daily_Ingestor:
             fresh = self._capture(self._open())
             if self._fingerprint(fresh) != before_hash:
                 raise Stage0Error("CONCURRENT_MODIFICATION", "Workbook changed after STATE_BEFORE")
+            self.write_attempted = True
             committed = True  # a write could succeed and the response fail
             try:
                 self._commit(fresh, plans)

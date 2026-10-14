@@ -46,6 +46,7 @@ async def drain_fmp_preclose(*, status_fn, plan_fn, step_fn,
     began = monotonic()
     good = []
     skipped = []
+    transient_held = []
     reason = "BUDGET_EXHAUSTED"
     for _ in range(max_steps):
         if not preclose(now_fn()) or monotonic() - began >= max_wall_seconds:
@@ -89,6 +90,19 @@ async def drain_fmp_preclose(*, status_fn, plan_fn, step_fn,
         if step.get("status") == "SOURCE_RETRYABLE":
             if step.get("symbol") != symbol or step.get("checkpoint_advanced") is not False:
                 raise DrainHalt("RETRYABLE_NOT_VERIFIED")
+            if step.get("temporarily_held") is True:
+                check = await status_fn()
+                if (
+                    check.get("pending_reconciliation")
+                    or check.get("utc_date") != day
+                    or symbol not in (check.get("transient_prewrite_today") or {})
+                    or symbol in (check.get("checkpoint") or {}).get("completed_symbols", [])
+                ):
+                    raise DrainHalt("PREWRITE_HOLD_NOT_VERIFIED")
+                transient_held.append(symbol)
+                if on_step:
+                    on_step("TEMP_HELD",symbol)
+                continue
             reason = "RETRYABLE_SOURCE_" + symbol
             break
         if step.get("status") == "FMP_QUEUE_EMPTY":
@@ -117,6 +131,7 @@ async def drain_fmp_preclose(*, status_fn, plan_fn, step_fn,
         "status": reason,
         "committed": good,
         "deferred": skipped,
+        "transient_prewrite_held": transient_held,
         "verified_count": len(good),
         "deferred_count": len(skipped),
         "ranking_permitted": False,

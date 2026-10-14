@@ -20,6 +20,11 @@ LOCK_KEY = "askliam:v651:stage0:exclusive"
 LOCK_SECONDS = 900
 MIN_QUOTA_RESERVE = 40
 MAX_BATCH = 5
+TRANSIENT_HOLD_SECONDS = 1800
+
+def transient_hold_key(day):
+    return "askliam:v651:stage0:transient_prewrite:" + day
+
 
 _RELEASE_LUA = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
@@ -76,6 +81,7 @@ class Stage0BatchCoordinator:
             "pending_reconciliation": bool(pending_raw),
             "pending": json.loads(pending_raw) if pending_raw else None,
             "deferred_today": await self.deferred_today(),
+            "transient_prewrite_today": await self.transient_prewrite_today(),
             "fmp_quote_402_cooldowns": await self.fmp_402_cooldowns(),
         }
 
@@ -86,6 +92,51 @@ class Stage0BatchCoordinator:
         if isinstance(data, list):
             return dict(zip(data[::2], data[1::2]))
         return data if isinstance(data, dict) else {}
+
+    async def transient_prewrite_today(self):
+        """Temporary source/API retry holds, never provider-deferred or scored."""
+        raw = await self.redis.call("HGETALL", transient_hold_key(utc_day()))
+        if isinstance(raw, list):
+            return dict(zip(raw[::2], raw[1::2]))
+        return raw if isinstance(raw, dict) else {}
+
+    async def mark_transient_prewrite(self, symbols, safe_code, token):
+        """Atomic PREWRITE-only journal cleanup + short retry hold.
+
+        Caller proves Stage0_Daily_Ingestor.write_attempted is false.
+        This is NOT usable for Sheets writes, postwrite reads, or uncertain
+        status codes. Atomic Redis CAS also enforces original exclusive lease.
+        """
+        if len(symbols) != 1 or safe_code not in (
+            "SHEET_READ_FAILED", "AUTHENTICATION_FAILED",
+        ):
+            raise Stage0Error("RECONCILIATION_REQUIRED","Unapproved prewrite error")
+        day = utc_day()
+        raw = await self.redis.call("GET", pending_key(day))
+        if not isinstance(raw, str):
+            raise Stage0Error("RECONCILIATION_REQUIRED","PREPARED journal missing")
+        try:
+            j = json.loads(raw)
+        except (ValueError,TypeError):
+            raise Stage0Error("RECONCILIATION_REQUIRED","Invalid journal") from None
+        if (not isinstance(j,dict) or j.get("status")!="PREPARED"
+            or j.get("symbols")!=symbols
+            or j.get("run_id") != ("STAGE0-" + day.replace("-","") + "-V6.5.1")):
+            raise Stage0Error("RECONCILIATION_REQUIRED","Unexpected journal")
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[3], ARGV[3], ARGV[4])
+redis.call('EXPIRE', KEYS[3], tonumber(ARGV[5]))
+redis.call('DEL', KEYS[2])
+return 1
+"""
+        result = await self.redis.eval(
+            script,[LOCK_KEY,pending_key(day),transient_hold_key(day)],
+            [token,raw,symbols[0],safe_code,TRANSIENT_HOLD_SECONDS],
+        )
+        if int(result or 0)!=1:
+            raise Stage0Error("RECONCILIATION_REQUIRED","Prewrite retry hold CAS failed")
 
     async def fmp_402_cooldowns(self):
         """Persist FMP quote entitlements across UTC day rollover (7d fields)."""
@@ -264,14 +315,28 @@ return redis.call('DEL', KEYS[2])
             spreadsheet_id=self.spreadsheet_id,
         )
         ingestor.run_id = run_id
-        book = ingestor._open()
-        adapter = ExistingFMPStage0Adapter(
-            book, run_id,
-            max_symbols=len(symbols),
-            historical_budget=len(symbols),
-            symbols=symbols,
-        )
-        return ingestor.run()
+        try:
+            book = ingestor._open()
+            adapter = ExistingFMPStage0Adapter(
+                book, run_id,
+                max_symbols=len(symbols),
+                historical_budget=len(symbols),
+                symbols=symbols,
+            )
+            return ingestor.run()
+        except Stage0Error as exc:
+            # NO Sheet mutation could occur before write_attempted becomes true.
+            # Only known transient Google API failures are eligible for an
+            # atomic PREPARED abort.  A post-write failure remains blocked.
+            if (
+                not ingestor.write_attempted
+                and exc.status in ("SHEET_READ_FAILED","AUTHENTICATION_FAILED")
+                and any(marker in exc.detail for marker in (
+                    "APIError","Timeout","TransportError"
+                ))
+            ):
+                raise Stage0Error("SAFE_PREWRITE_RETRYABLE",exc.status) from None
+            raise
 
     async def finish(self, day, run_id, previous, symbols, result, token):
         if result.get("commit_status") != "COMMITTED" or result.get("verify_status") != "PASS":
