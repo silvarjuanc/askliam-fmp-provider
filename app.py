@@ -345,11 +345,101 @@ class Provider:
 
 provider = Provider()
 
+async def _explicit_one_shot_coinbase_stage0():
+    """Run only the operator-authorized BTC/ETH bootstrap on its exact UTC day.
+
+    Never runs during normal startups, on /health, or on schedule. Individual
+    Redis checkpoints make restart attempts idempotent. This is data-only.
+    """
+    import logging
+    from stage0_crypto_coinbase_commit import (
+        spot_preflight, spot_commit_one, confirm_spot,
+    )
+    from stage0_crypto_commit import crypto_checkpoint_key
+    from stage0_ingestor import Stage0Error
+    logger = logging.getLogger("askliam.stage0.spot-once")
+    today = datetime.now(timezone.utc).date().isoformat()
+    if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") != today:
+        return
+    symbols = os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_SYMBOLS", "")
+    if symbols != "BTC,ETH" or provider.state is None or provider.client is None:
+        logger.error("COINBASE_ONESHOT_BLOCKED: invalid scope or unavailable state")
+        return
+    if (os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_ENABLED", "").lower() != "true"
+        or os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_SYMBOL") != symbols
+        or os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_UTC_DAY") != today):
+        logger.error("COINBASE_ONESHOT_BLOCKED: scoped write permission absent")
+        return
+    for symbol in symbols.split(","):
+        try:
+            if datetime.now(timezone.utc).date().isoformat() != today:
+                logger.error("COINBASE_ONESHOT_HALTED: UTC_DAY_CHANGED")
+                return
+            # Skip an already readback-verified spot import. Read-only Redis.
+            from stage0_crypto_coinbase_commit import spot_checkpoint_key
+            stored = await provider.state.call("GET", spot_checkpoint_key(today))
+            if stored:
+                state = json.loads(stored)
+                if (state.get("version") != VERSION or state.get("utc_date") != today
+                    or state.get("status") != "COMMITTED_VERIFY_PASS"):
+                    logger.error("COINBASE_ONESHOT_HALTED: CHECKPOINT_INVALID")
+                    return
+                if symbol in state.get("completed_symbols", []):
+                    logger.info("COINBASE_ONESHOT_ALREADY_VERIFIED symbol=%s", symbol)
+                    continue
+            # No writing unless the provider payload and production sheet
+            # diff both pass a separate read-only preflight.
+            check = await spot_preflight(
+                symbol, redis=provider.state, client=provider.client,
+            )
+            logger.info(
+                "COINBASE_ONESHOT_PREFLIGHT_PASS symbol=%s raw_inserts=%s "
+                "raw_updates=%s snapshot_inserts=%s snapshot_updates=%s",
+                symbol, check["plans"]["Raw_OHLCV"]["inserts"],
+                check["plans"]["Raw_OHLCV"]["updates"],
+                check["plans"]["Market_Data_Snapshot"]["inserts"],
+                check["plans"]["Market_Data_Snapshot"]["updates"],
+            )
+            done = await spot_commit_one(
+                symbol, confirm_spot(symbol), redis=provider.state,
+                client=provider.client,
+            )
+            logger.info(
+                "COINBASE_ONESHOT_COMMIT_PASS symbol=%s status=%s "
+                "bars=%s run_id=%s",
+                symbol, done["status"], done["daily_bars"], done["run_id"],
+            )
+        except Stage0Error as exc:
+            logger.error(
+                "COINBASE_ONESHOT_HALTED symbol=%s code=%s detail=%s",
+                symbol, exc.status, exc.detail,
+            )
+            # A partial write may have happened. Stop until reconciled.
+            return
+        except Exception as exc:
+            logger.error(
+                "COINBASE_ONESHOT_HALTED symbol=%s error_class=%s",
+                symbol, type(exc).__name__,
+            )
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
-    yield
-    await provider.stop()
+    one_shot = None
+    if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
+        one_shot = asyncio.create_task(_explicit_one_shot_coinbase_stage0())
+    try:
+        yield
+    finally:
+        if one_shot is not None and not one_shot.done():
+            one_shot.cancel()
+            try:
+                await one_shot
+            except asyncio.CancelledError:
+                pass
+        await provider.stop()
 
 app = FastAPI(title="AskLiam FMP Enrichment Provider", version=VERSION, lifespan=lifespan)
 
