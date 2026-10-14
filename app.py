@@ -424,11 +424,43 @@ async def _explicit_one_shot_coinbase_stage0():
             return
 
 
+async def _explicit_coinbase_reconcile_then_bootstrap():
+    """Fail-closed exact-day journal repair BEFORE the normal spot bootstrap."""
+    import logging
+    from stage0_crypto_coinbase_reconcile import reconcile_after_readback_error
+    from stage0_ingestor import Stage0Error
+    log = logging.getLogger("uvicorn.error")
+    if (os.getenv("ASKLIAM_COINBASE_SPOT_RECOVER_DATE") != "2026-10-14"
+        or os.getenv("ASKLIAM_COINBASE_SPOT_RECOVER_SYMBOL") != "ETH"):
+        log.error("COINBASE_POSTWRITE_RECOVERY_BLOCKED invalid scope")
+        return
+    try:
+        repaired = await reconcile_after_readback_error(
+            redis=provider.state, client=provider.client,
+        )
+    except Stage0Error as exc:
+        log.error("COINBASE_POSTWRITE_RECOVERY_HALTED code=%s detail=%s",
+                  exc.status, exc.detail)
+        return
+    except Exception as exc:
+        log.error("COINBASE_POSTWRITE_RECOVERY_HALTED error_class=%s",
+                  type(exc).__name__)
+        return
+    log.info(
+        "COINBASE_POSTWRITE_RECOVERY_PASS status=%s symbols=%s bars=%s",
+        repaired["status"], ",".join(repaired["symbols_verified_today"]),
+        repaired["daily_bars_verified"],
+    )
+    await _explicit_one_shot_coinbase_stage0()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
     one_shot = None
-    if os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
+    if os.getenv("ASKLIAM_COINBASE_SPOT_RECOVER_DATE", "") == day_utc():
+        one_shot = asyncio.create_task(_explicit_coinbase_reconcile_then_bootstrap())
+    elif os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
         one_shot = asyncio.create_task(_explicit_one_shot_coinbase_stage0())
     try:
         yield
