@@ -192,7 +192,13 @@ async def reconcile_after_readback_error(*, redis, client: httpx.AsyncClient) ->
                     journal_digest=digest,
                 )
                 break
-            except Stage0Error:
+            except Stage0Error as exc:
+                # Only explicit Google API transport/rate-limit failures can
+                # be retried. Schema, provenance and digest errors halt now.
+                if (exc.status in ("SHEET_READ_FAILED", "AUTHENTICATION_FAILED")
+                    and "APIError" in exc.detail):
+                    last_error = exc.status + "_APIError"
+                    continue
                 raise
             except Exception as err:
                 last_error = type(err).__name__
