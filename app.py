@@ -649,6 +649,32 @@ async def _recover_ge_legacy_prewrite_once():
         log.error("GE_PREWRITE_RECOVERY_HALTED error_class=%s",type(err).__name__)
 
 
+async def _jpm_postwrite_reconcile_once():
+    """Explicit scoped FMP/Sheets/Redis readback-only reconciliation."""
+    import logging
+    from stage0_jpm_postwrite_reconcile import reconcile_jpm_postwrite
+    from stage0_ingestor import Stage0Error
+    logger=logging.getLogger("uvicorn.error")
+    if (os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_RECOVER_UTC_DAY")!="2026-10-14"
+        or os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_CONFIRM")!="VERIFY_JPM_FULL_SHEETS_AND_FMP_CAS"):
+        logger.error("JPM_POSTWRITE_RECOVERY_HALTED reason=OPERATOR_SCOPE_INVALID")
+        return
+    if provider.state is None or provider.client is None:
+        logger.error("JPM_POSTWRITE_RECOVERY_HALTED reason=RUNTIME_UNAVAILABLE")
+        return
+    try:
+        result=await reconcile_jpm_postwrite(redis=provider.state,provider=provider)
+        logger.info("JPM_POSTWRITE_RECOVERY_PASS status=%s bars=%s "
+                    "fmp_replay=%s checkpoint_advanced=%s sheets_changed=false "
+                    "ranking_permitted=false",
+                    result["status"],result["new_ohlcv_bars_verified"],
+                    result["fmp_replay_verified"],result["checkpoint_advanced"])
+    except Stage0Error as exc:
+        logger.error("JPM_POSTWRITE_RECOVERY_HALTED reason=%s",exc.status)
+    except Exception as exc:
+        logger.error("JPM_POSTWRITE_RECOVERY_HALTED class=%s",type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -675,9 +701,18 @@ async def lifespan(app: FastAPI):
     ge_recovery_task = None
     if os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY", "") == day_utc():
         ge_recovery_task = asyncio.create_task(_recover_ge_legacy_prewrite_once())
+    jpm_recovery_task = None
+    if os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_RECOVER_UTC_DAY", "") == day_utc():
+        jpm_recovery_task = asyncio.create_task(_jpm_postwrite_reconcile_once())
     try:
         yield
     finally:
+        if jpm_recovery_task is not None and not jpm_recovery_task.done():
+            jpm_recovery_task.cancel()
+            try:
+                await jpm_recovery_task
+            except asyncio.CancelledError:
+                pass
         if ge_recovery_task is not None and not ge_recovery_task.done():
             ge_recovery_task.cancel()
             try:
