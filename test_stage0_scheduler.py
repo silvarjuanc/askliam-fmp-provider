@@ -12,8 +12,8 @@ from scripts.stage0_daily_scheduler import (
 import httpx
 
 UTC = timezone.utc
-SUMMER = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
-WINTER = datetime(2026, 12, 14, 15, 0, tzinfo=UTC)
+SUMMER = datetime(2026, 10, 13, 13, 0, tzinfo=UTC)
+WINTER = datetime(2026, 12, 14, 14, 0, tzinfo=UTC)
 
 
 class SchedulerTests(unittest.TestCase):
@@ -28,25 +28,26 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("CRON_DISARMED", buffer.getvalue())
 
-    def test_precutoff_windows_across_ny_dst(self):
-        self.assertTrue(schedule_gate(SUMMER))  # 10:00 EDT
-        self.assertTrue(schedule_gate(WINTER))  # 10:00 EST
-        self.assertTrue(schedule_gate(datetime(2026, 10, 13, 17, 0, tzinfo=UTC)))  # 13 EDT
-        self.assertTrue(schedule_gate(datetime(2026, 12, 14, 18, 0, tzinfo=UTC)))  # 13 EST
-        self.assertTrue(schedule_gate(datetime(2026, 10, 13, 19, 0, tzinfo=UTC)))  # 15 EDT
-        self.assertTrue(schedule_gate(datetime(2026, 12, 14, 20, 0, tzinfo=UTC)))  # 15 EST
-        self.assertFalse(schedule_gate(datetime(2026, 10, 13, 15, 0, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 12, 14, 14, 0, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 10, 13, 20, 0, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 12, 14, 21, 0, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 10, 17, 14, 0, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 10, 13, 13, 59, tzinfo=UTC)))
-        self.assertFalse(schedule_gate(datetime(2026, 10, 13, 14, 11, tzinfo=UTC)))
+    def test_stockholm_preanalysis_windows_across_europe_dst(self):
+        # Stockholm windows 09:00, 12:00, 14:00, 15:00, regardless of US DST.
+        for summer_utc, winter_utc in ((7,8), (10,11), (12,13), (13,14)):
+            self.assertTrue(schedule_gate(datetime(2026,10,13,summer_utc,0,tzinfo=UTC)))
+            self.assertTrue(schedule_gate(datetime(2026,12,14,winter_utc,0,tzinfo=UTC)))
+        self.assertTrue(schedule_gate(SUMMER))
+        self.assertTrue(schedule_gate(WINTER))
+        self.assertFalse(schedule_gate(datetime(2026,10,13,14,0,tzinfo=UTC))) # 16:00 CEST
+        self.assertFalse(schedule_gate(datetime(2026,12,14,15,0,tzinfo=UTC))) # 16:00 CET
+        self.assertFalse(schedule_gate(datetime(2026,10,17,7,0,tzinfo=UTC)))  # Saturday
+        self.assertFalse(schedule_gate(datetime(2026,10,13,13,11,tzinfo=UTC)))
+        self.assertFalse(schedule_gate(datetime(2026,10,13,13,45,tzinfo=UTC)))
+        # European DST fall-back (2026-10-25) keeps 09:00 CET as 08:00 UTC.
+        self.assertTrue(schedule_gate(datetime(2026,10,26,8,0,tzinfo=UTC)))
+        self.assertFalse(schedule_gate(datetime(2026,10,26,7,0,tzinfo=UTC)))
 
     def test_rejects_unscheduled_without_any_network(self):
         with patch("scripts.stage0_daily_scheduler.request") as rq:
             out = run(object(), "placeholder", now=datetime(2026, 10, 13, 21, 0, tzinfo=UTC))
-            self.assertEqual(out["status"], "NOT_SCHEDULED_NEW_YORK_PRECLOSE")
+            self.assertEqual(out["status"], "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS")
             rq.assert_not_called()
 
     def test_missing_server_opt_in_fails_before_writer(self):
@@ -210,7 +211,7 @@ class SchedulerTests(unittest.TestCase):
     def test_precutoff_1600_stops_before_any_remote_action(self):
         with patch("scripts.stage0_daily_scheduler.request") as request:
             out=run(object(),"secret",now=datetime(2026,10,13,20,0,tzinfo=UTC))
-        self.assertEqual(out["status"],"NOT_SCHEDULED_NEW_YORK_PRECLOSE")
+        self.assertEqual(out["status"],"NOT_SCHEDULED_STOCKHOLM_PREANALYSIS")
         request.assert_not_called()
 
     def test_unsafe_crypto_error_halts_before_next_asset(self):
