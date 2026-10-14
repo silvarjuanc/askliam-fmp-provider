@@ -623,6 +623,32 @@ async def _read_only_stage0_journal_once():
         log.error("STAGE0_JOURNAL_INSPECT_HALTED reason_class=%s",type(e).__name__)
 
 
+async def _recover_ge_legacy_prewrite_once():
+    """Explicitly scoped 2026-10-14 only; historical GE rows immutable."""
+    import logging
+    from stage0_ge_legacy_prewrite_recovery import recover_ge_prewrite
+    from stage0_ingestor import Stage0Error
+    log=logging.getLogger("uvicorn.error")
+    if (os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY")!="2026-10-14"
+        or os.getenv("ASKLIAM_STAGE0_GE_RECOVER_CONFIRM")!="VERIFY_LEGACY_GE_PREWRITE_ONLY"):
+        log.error("GE_PREWRITE_RECOVERY_HALTED reason=OPERATOR_SCOPE_INVALID")
+        return
+    if provider.state is None:
+        log.error("GE_PREWRITE_RECOVERY_HALTED reason=REDIS_UNAVAILABLE")
+        return
+    try:
+        result=await recover_ge_prewrite(provider.state)
+        log.info(
+            "GE_PREWRITE_RECOVERY_PASS status=%s prior_rows=%s "
+            "sheet_writes=false checkpoint_advanced=false",
+            result["status"],result["verified_historical_rows"],
+        )
+    except Stage0Error as err:
+        log.error("GE_PREWRITE_RECOVERY_HALTED reason=%s",err.status)
+    except Exception as err:
+        log.error("GE_PREWRITE_RECOVERY_HALTED error_class=%s",type(err).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -646,9 +672,18 @@ async def lifespan(app: FastAPI):
     journal_task = None
     if os.getenv("ASKLIAM_STAGE0_JOURNAL_INSPECT_ONCE_DAY", "") == day_utc():
         journal_task = asyncio.create_task(_read_only_stage0_journal_once())
+    ge_recovery_task = None
+    if os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY", "") == day_utc():
+        ge_recovery_task = asyncio.create_task(_recover_ge_legacy_prewrite_once())
     try:
         yield
     finally:
+        if ge_recovery_task is not None and not ge_recovery_task.done():
+            ge_recovery_task.cancel()
+            try:
+                await ge_recovery_task
+            except asyncio.CancelledError:
+                pass
         if journal_task is not None and not journal_task.done():
             journal_task.cancel()
             try:
