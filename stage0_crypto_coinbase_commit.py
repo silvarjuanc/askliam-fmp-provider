@@ -18,7 +18,8 @@ import pandas as pd
 from stage0_batch import Stage0BatchCoordinator, LOCK_KEY, pending_key
 from stage0_crypto_coinbase_spot import ENDPOINT
 from stage0_crypto_coinbase_prepare import prepare_coinbase_spot_frames, PRICE_SOURCE
-from stage0_crypto_commit import COMMIT_LUA, SOURCE_PRICE
+from stage0_crypto_commit import COMMIT_LUA
+from stage0_crypto_ingest_prepare import SOURCE_PRICE
 from stage0_crypto_probe import COINGECKO_IDS, HYPERLIQUID_INFO
 from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
 
