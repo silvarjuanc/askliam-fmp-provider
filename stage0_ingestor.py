@@ -369,6 +369,31 @@ class Stage0_Daily_Ingestor:
             details[tab] = {"verified_rows": len(e), "status": "PASS"}
         return details
 
+    def _verify_with_transient_retries(self, expected: dict) -> dict:
+        """Retry *read-only* postwrite verification after transient Sheets errors.
+
+        NEVER repeat _commit: ambiguous write outcomes must remain behind
+        PREPARED Redis journal until an independent readback verifies them.
+        Google Sheets APIError may be temporary during 10k+ row captures.
+        """
+        last = None
+        for attempt, wait in enumerate((0, 3, 8, 15)):
+            if wait:
+                time.sleep(wait)
+            try:
+                return self._verify(expected)
+            except Stage0Error as exc:
+                last = exc
+                transient = (
+                    (exc.status in ("AUTHENTICATION_FAILED", "SHEET_READ_FAILED")
+                     and ("APIError" in exc.detail or "Timeout" in exc.detail
+                          or "TransportError" in exc.detail))
+                    or exc.status == "VERIFICATION_FAILED"
+                )
+                if not transient or attempt == 3:
+                    raise
+        raise last  # unreachable
+
     def run(self) -> dict:
         # In-process exclusion. Deploy as ONE worker instance; cross-instance
         # locking must be implemented externally before horizontal scaling.
@@ -394,7 +419,7 @@ class Stage0_Daily_Ingestor:
                     "PARTIAL_COMMIT_UNVERIFIED",
                     f"Write interrupted: {type(exc).__name__}; halt and reconcile",
                 ) from None
-            verified = self._verify(expected)
+            verified = self._verify_with_transient_retries(expected)
             return {
                 "version": VERSION,
                 "run_id": self.run_id,
