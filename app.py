@@ -475,6 +475,35 @@ async def _mirror_runtime_evidence_once():
         log.error("STAGE0_EVIDENCE_SYNC_HALTED code=%s", status)
 
 
+async def _fmp_preclose_entitlement_probe_once():
+    """Operator-controlled source diagnostics only. Never logs keys or prices."""
+    import logging
+    from stage0_fmp_entitlement_probe import probe_preclose_entitlements
+    log = logging.getLogger("uvicorn.error")
+    try:
+        result = await probe_preclose_entitlements(provider)
+        if result["status"] != "SOURCE_ENTITLEMENT_AUDIT_COMPLETED":
+            log.warning("FMP_PRECLOSE_PROBE_HALTED status=%s", result["status"])
+            return
+        for item in result["symbols"]:
+            for domain, detail in item["domains"].items():
+                log.info(
+                    "FMP_PRECLOSE_DOMAIN symbol=%s domain=%s status=%s reason=%s cache_hit=%s",
+                    item["symbol"], domain, detail["status"],
+                    detail.get("reason", "NONE"),
+                    detail.get("cache_hit", False),
+                )
+        log.info(
+            "FMP_PRECLOSE_AUDIT_PASS used_before=%s used_after=%s "
+            "remaining_after=%s sheet_writes=0",
+            result["quota_used_before"], result["quota_used_after"],
+            result["quota_remaining_after"],
+        )
+    except Exception as exc:
+        # Never include raw provider response or any secret-bearing details.
+        log.error("FMP_PRECLOSE_PROBE_HALTED exception=%s", type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -486,9 +515,18 @@ async def lifespan(app: FastAPI):
     evidence_task = None
     if os.getenv("ASKLIAM_RUNTIME_EVIDENCE_ONCE_DAY", "") == day_utc():
         evidence_task = asyncio.create_task(_mirror_runtime_evidence_once())
+    fmp_probe_task = None
+    if os.getenv("ASKLIAM_FMP_PRECLOSE_PROBE_ONCE_DAY", "") == day_utc():
+        fmp_probe_task = asyncio.create_task(_fmp_preclose_entitlement_probe_once())
     try:
         yield
     finally:
+        if fmp_probe_task is not None and not fmp_probe_task.done():
+            fmp_probe_task.cancel()
+            try:
+                await fmp_probe_task
+            except asyncio.CancelledError:
+                pass
         if evidence_task is not None and not evidence_task.done():
             evidence_task.cancel()
             try:
