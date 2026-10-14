@@ -714,31 +714,35 @@ async def _jpm_postwrite_reconcile_once():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
+    # Restarting/redeploying Render must NOT run Stage0 ingestion or recovery.
+    # Historical once-date flags are never sufficient to authorize writes.
+    # Only a separate deliberate maintenance override can allow them.
+    allow_startup_oneshots = os.getenv("ASKLIAM_STARTUP_ONESHOTS_ENABLED", "false").strip().lower() == "true"
     one_shot = None
-    if os.getenv("ASKLIAM_COINBASE_SPOT_RECOVER_DATE", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_COINBASE_SPOT_RECOVER_DATE", "") == day_utc():
         one_shot = asyncio.create_task(_explicit_coinbase_reconcile_then_bootstrap())
-    elif os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
+    elif allow_startup_oneshots and os.getenv("ASKLIAM_COINBASE_SPOT_STARTUP_ONCE_DATE", "") == day_utc():
         one_shot = asyncio.create_task(_explicit_one_shot_coinbase_stage0())
     evidence_task = None
-    if os.getenv("ASKLIAM_RUNTIME_EVIDENCE_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_RUNTIME_EVIDENCE_ONCE_DAY", "") == day_utc():
         evidence_task = asyncio.create_task(_mirror_runtime_evidence_once())
     fmp_probe_task = None
-    if os.getenv("ASKLIAM_FMP_PRECLOSE_PROBE_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_FMP_PRECLOSE_PROBE_ONCE_DAY", "") == day_utc():
         fmp_probe_task = asyncio.create_task(_fmp_preclose_entitlement_probe_once())
     equity_task = None
-    if os.getenv("ASKLIAM_FMP_EQUITY_BOOTSTRAP_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_FMP_EQUITY_BOOTSTRAP_ONCE_DAY", "") == day_utc():
         equity_task = asyncio.create_task(_run_fmp_equity_preclose_bootstrap_once())
     fmp_drain_task = None
-    if os.getenv("ASKLIAM_FMP_PRECLOSE_DRAIN_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_FMP_PRECLOSE_DRAIN_ONCE_DAY", "") == day_utc():
         fmp_drain_task = asyncio.create_task(_run_fmp_preclose_drain_once())
     journal_task = None
-    if os.getenv("ASKLIAM_STAGE0_JOURNAL_INSPECT_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_STAGE0_JOURNAL_INSPECT_ONCE_DAY", "") == day_utc():
         journal_task = asyncio.create_task(_read_only_stage0_journal_once())
     ge_recovery_task = None
-    if os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY", "") == day_utc():
         ge_recovery_task = asyncio.create_task(_recover_ge_legacy_prewrite_once())
     jpm_recovery_task = None
-    if os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_RECOVER_UTC_DAY", "") == day_utc():
+    if allow_startup_oneshots and os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_RECOVER_UTC_DAY", "") == day_utc():
         jpm_recovery_task = asyncio.create_task(_jpm_postwrite_reconcile_once())
     try:
         yield

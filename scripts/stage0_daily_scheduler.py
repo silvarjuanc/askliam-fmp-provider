@@ -1,8 +1,10 @@
 """AskLiam V6.5.1 unattended Stage0 driver. No trading or Ranking.
 
-Run via Render Cron '0 14,15,17,18,19,20 * * 1-5' UTC.
-NY-local guard selects 10:00, 13:00 and 15:00 ET, across DST.
-This is PRE-CLOSE ingestion: stop by 15:40 ET; NEVER start at 16:00.
+Configure Render Cron '0 7,8,10,11,12,13,14 * * 1-5' UTC.
+Stockholm-local guard selects 09:00, 12:00, 14:00, 15:00 (CET/CEST).
+This is PRE-ANALYSIS ingestion: finish before 15:45 Europe/Stockholm;
+NEVER start the daily analysis at 16:00 America/New_York.
+The Render Cron schedule must be updated separately; code alone cannot do it.
 Environment: ASKLIAM_SERVICE_TOKEN (set ONCE on the cron service),
 ASKLIAM_BASE_URL (optional; hard-coded trusted default).
 Server must separately opt-in via ASKLIAM_STAGE0_AUTO_ENABLED and
@@ -26,11 +28,11 @@ import httpx
 VERSION = "V6.5.1"
 CRYPTO = ("ADA", "BTC", "DOGE", "ETH", "LINK", "SOL", "SUI", "XRP")
 MAX_WALL_SECONDS = 75 * 60
-PRECLOSE_MINUTES_AT_1500 = 30
-PRECLOSE_HOURS = (10, 13, 15)
+PRECLOSE_MINUTES_AT_1500 = 20
+PRECLOSE_HOURS = (9, 12, 14, 15)
 MIN_FMP_QUOTA = 40
 BASE_URL = "https://askliam-fmp-provider.onrender.com"
-NY = ZoneInfo("America/New_York")
+STOCKHOLM = ZoneInfo("Europe/Stockholm")
 
 
 class SchedulerHalt(RuntimeError):
@@ -40,9 +42,9 @@ class SchedulerHalt(RuntimeError):
 def schedule_gate(now: datetime) -> bool:
     if now.tzinfo is None:
         raise ValueError("timezone-aware UTC required")
-    local = now.astimezone(NY)
-    # Cron UTC DST dual-slot; only NY-local hour/mid-minute window may run.
-    # Never ingest at or after the 16:00 analysis cutoff.
+    local = now.astimezone(STOCKHOLM)
+    # Cron UTC DST dual-slot; execute only at Stockholm-local scheduled windows.
+    # Never begin ingestion during or after the 16:00 Stockholm daily analysis.
     return (local.weekday() < 5 and local.hour in PRECLOSE_HOURS
             and local.minute <= 10)
 
@@ -116,24 +118,26 @@ def crypto_checkpoint(client, token: str, day: str):
 def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_WALL_SECONDS):
     now = now or datetime.now(timezone.utc)
     if not schedule_gate(now):
-        return {"version": VERSION, "status": "NOT_SCHEDULED_NEW_YORK_PRECLOSE",
+        return {"version": VERSION, "status": "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS",
                 "wrote_data": False}
     day = now.astimezone(timezone.utc).date().isoformat()
     run_id = "STAGE0-" + day.replace("-", "") + "-V6.5.1"
     started = time.monotonic()
-    phase_ny = now.astimezone(NY)
-    # 15:00 reconciliation must finish with margin before 16:00 ET. An
-    # individual HTTP step can take up to 300s: keep 20m spare.
-    wall_cap = min(max_wall_seconds, (
-        PRECLOSE_MINUTES_AT_1500 * 60 if phase_ny.hour == 15 else MAX_WALL_SECONDS
-    ))
+    phase_se = now.astimezone(STOCKHOLM)
+    # 15:00 Stockholm last acquisition phase must finish before 15:45.
+    # Keep 25 minutes spare for checkpoints, fresh quotes and analysis.
+    # Reserve a non-overlap window for the next scheduled ingestion phase.
+    # Most calls are bounded at 300s, and each phase leaves >=10m margin.
+    phase_caps_seconds = {9: 75 * 60, 12: 75 * 60,
+                          14: 40 * 60, 15: PRECLOSE_MINUTES_AT_1500 * 60}
+    wall_cap = min(max_wall_seconds, phase_caps_seconds[phase_se.hour])
     result = {
         "version": VERSION,
         "utc_date": day,
-        "scheduled_time": phase_ny.strftime("%H:%M America/New_York"),
-        "cutoff_time": "16:00 America/New_York",
-        "phase": {10: "MORNING_BACKFILL", 13: "MIDDAY_INCREMENTAL",
-                  15: "PRECLOSE_FINALIZE"}[phase_ny.hour],
+        "scheduled_time": phase_se.strftime("%H:%M Europe/Stockholm"),
+        "cutoff_time": "16:00 Europe/Stockholm",
+        "phase": {9: "MORNING_BACKFILL", 12: "MIDDAY_INCREMENTAL",
+                  14: "AFTERNOON_INCREMENTAL", 15: "PREANALYSIS_FINALIZE"}[phase_se.hour],
         "status": "RUNNING",
         "crypto_verified": [],
         "crypto_previously_verified": [],
@@ -319,7 +323,7 @@ def main() -> int:
         output = run(client, token)
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0 if output["status"] in (
-        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_NEW_YORK_PRECLOSE",
+        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS",
         "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN",
     ) else 1
 
