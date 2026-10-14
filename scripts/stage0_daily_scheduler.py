@@ -1,7 +1,8 @@
 """AskLiam V6.5.1 unattended Stage0 driver. No trading or Ranking.
 
-Invoke with Render Cron at '0 20,21 * * 1-5' UTC. The NY-local guard
-selects exactly 16:00 America/New_York across DST transitions.
+Run via Render Cron '0 14,15,17,18,19,20 * * 1-5' UTC.
+NY-local guard selects 10:00, 13:00 and 15:00 ET, across DST.
+This is PRE-CLOSE ingestion: stop by 15:40 ET; NEVER start at 16:00.
 Environment: ASKLIAM_SERVICE_TOKEN (set ONCE on the cron service),
 ASKLIAM_BASE_URL (optional; hard-coded trusted default).
 Server must separately opt-in via ASKLIAM_STAGE0_AUTO_ENABLED and
@@ -25,6 +26,8 @@ import httpx
 VERSION = "V6.5.1"
 CRYPTO = ("ADA", "BTC", "DOGE", "ETH", "LINK", "SOL", "SUI", "XRP")
 MAX_WALL_SECONDS = 75 * 60
+PRECLOSE_MINUTES_AT_1500 = 30
+PRECLOSE_HOURS = (10, 13, 15)
 MIN_FMP_QUOTA = 40
 BASE_URL = "https://askliam-fmp-provider.onrender.com"
 NY = ZoneInfo("America/New_York")
@@ -38,8 +41,10 @@ def schedule_gate(now: datetime) -> bool:
     if now.tzinfo is None:
         raise ValueError("timezone-aware UTC required")
     local = now.astimezone(NY)
-    # Tolerate reasonable cron startup delay without allowing a late rerun.
-    return local.weekday() < 5 and local.hour == 16
+    # Cron UTC DST dual-slot; only NY-local hour/mid-minute window may run.
+    # Never ingest at or after the 16:00 analysis cutoff.
+    return (local.weekday() < 5 and local.hour in PRECLOSE_HOURS
+            and local.minute <= 10)
 
 
 def safe_error(response: httpx.Response) -> str:
@@ -111,15 +116,24 @@ def crypto_checkpoint(client, token: str, day: str):
 def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_WALL_SECONDS):
     now = now or datetime.now(timezone.utc)
     if not schedule_gate(now):
-        return {"version": VERSION, "status": "NOT_SCHEDULED_NEW_YORK_1600",
+        return {"version": VERSION, "status": "NOT_SCHEDULED_NEW_YORK_PRECLOSE",
                 "wrote_data": False}
     day = now.astimezone(timezone.utc).date().isoformat()
     run_id = "STAGE0-" + day.replace("-", "") + "-V6.5.1"
     started = time.monotonic()
+    phase_ny = now.astimezone(NY)
+    # 15:00 reconciliation must finish with margin before 16:00 ET. An
+    # individual HTTP step can take up to 300s: keep 20m spare.
+    wall_cap = min(max_wall_seconds, (
+        PRECLOSE_MINUTES_AT_1500 * 60 if phase_ny.hour == 15 else MAX_WALL_SECONDS
+    ))
     result = {
         "version": VERSION,
         "utc_date": day,
-        "scheduled_time": "16:00 America/New_York",
+        "scheduled_time": phase_ny.strftime("%H:%M America/New_York"),
+        "cutoff_time": "16:00 America/New_York",
+        "phase": {10: "MORNING_BACKFILL", 13: "MIDDAY_INCREMENTAL",
+                  15: "PRECLOSE_FINALIZE"}[phase_ny.hour],
         "status": "RUNNING",
         "crypto_verified": [],
         "crypto_previously_verified": [],
@@ -133,7 +147,7 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
     }
 
     def budget_ok():
-        return time.monotonic() - started < max_wall_seconds
+        return time.monotonic() - started < wall_cap
 
     try:
         config = request(client, "GET", "/stage0/auto/config", token)
@@ -152,6 +166,62 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         spot_existing = set(cp.get("spot_completed_symbols") or [])
         if not native_existing.issubset(CRYPTO) or not spot_existing.issubset(CRYPTO):
             raise SchedulerHalt("INVALID_CRYPTO_CHECKPOINT")
+
+        # Equities/index ETFs (96 eligible) are the immediate blocking route.
+        # Give FMP the first bounded opportunity before crypto fallbacks.
+        # FMP: exhaust the time/quota/provider budget, NOT a fixed symbol count.
+        # Every step independently captures Sheets, commits, verifies, and
+        # advances the FMP-only UTC checkpoint.
+        while budget_ok():
+            state = assert_state(client, token, day)
+            quota = state.get("quota") or {}
+            if quota.get("blocked"):
+                result["fmp_stop_reason"] = "FMP_DAY_BLOCKED"
+                break
+            if int(quota.get("remaining", 0)) <= MIN_FMP_QUOTA:
+                result["fmp_stop_reason"] = "FMP_QUOTA_RESERVE"
+                break
+            plan = request(client, "GET", "/stage0/daily/plan", token)
+            if plan.get("version") != VERSION or plan.get("utc_date") != day:
+                raise SchedulerHalt("FMP_PLAN_MISMATCH")
+            if plan.get("pending_reconciliation"):
+                raise SchedulerHalt("RECONCILIATION_REQUIRED")
+            next_symbols = plan.get("next_symbols") or []
+            if not next_symbols:
+                result["fmp_stop_reason"] = "FMP_QUEUE_EMPTY"
+                break
+            expected = next_symbols[0]
+            try:
+                step = request(client, "POST", "/stage0/daily/step", token)
+            except SchedulerHalt as exc:
+                # Never retry failed/uncertain FMP writes automatically.
+                raise SchedulerHalt("FMP_STEP_HALTED_" + str(exc)) from None
+            if step.get("status") == "PROVIDER_DEFERRED":
+                if step.get("symbol") != expected or step.get("checkpoint_advanced") is not False:
+                    raise SchedulerHalt("FMP_DEFERRED_INCONSISTENT")
+                result["fmp_deferred"].append(expected)
+            elif step.get("status") == "SOURCE_RETRYABLE":
+                result["fmp_stop_reason"] = "FMP_RETRYABLE_SOURCE"
+                break
+            elif step.get("status") == "FMP_QUEUE_EMPTY":
+                result["fmp_stop_reason"] = "FMP_QUEUE_EMPTY"
+                break
+            elif (
+                step.get("daily_symbol") == expected
+                and step.get("commit_status") == "COMMITTED"
+                and step.get("verify_status") == "PASS"
+                and step.get("checkpoint_status") == "COMMITTED_VERIFY_PASS"
+            ):
+                state = assert_state(client, token, day)
+                if expected not in (state.get("checkpoint", {}).get("completed_symbols") or []):
+                    raise SchedulerHalt("FMP_CHECKPOINT_MISMATCH")
+                result["fmp_verified"].append(expected)
+            else:
+                raise SchedulerHalt("UNKNOWN_FMP_STEP_RESULT")
+            sleep(1)
+        else:
+            result["fmp_stop_reason"] = "FMP_RUNTIME_BUDGET"
+
 
         # Native-perpetual history and derivatives context are reference-only.
         # Idempotent daily checkpoints prevent a repeat POST to completed symbols.
@@ -208,59 +278,6 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
             result["crypto_verified"].append(symbol)
             sleep(1)
 
-        # FMP: exhaust the time/quota/provider budget, NOT a fixed symbol count.
-        # Every step independently captures Sheets, commits, verifies, and
-        # advances the FMP-only UTC checkpoint.
-        while budget_ok():
-            state = assert_state(client, token, day)
-            quota = state.get("quota") or {}
-            if quota.get("blocked"):
-                result["fmp_stop_reason"] = "FMP_DAY_BLOCKED"
-                break
-            if int(quota.get("remaining", 0)) <= MIN_FMP_QUOTA:
-                result["fmp_stop_reason"] = "FMP_QUOTA_RESERVE"
-                break
-            plan = request(client, "GET", "/stage0/daily/plan", token)
-            if plan.get("version") != VERSION or plan.get("utc_date") != day:
-                raise SchedulerHalt("FMP_PLAN_MISMATCH")
-            if plan.get("pending_reconciliation"):
-                raise SchedulerHalt("RECONCILIATION_REQUIRED")
-            next_symbols = plan.get("next_symbols") or []
-            if not next_symbols:
-                result["fmp_stop_reason"] = "FMP_QUEUE_EMPTY"
-                break
-            expected = next_symbols[0]
-            try:
-                step = request(client, "POST", "/stage0/daily/step", token)
-            except SchedulerHalt as exc:
-                # Never retry failed/uncertain FMP writes automatically.
-                raise SchedulerHalt("FMP_STEP_HALTED_" + str(exc)) from None
-            if step.get("status") == "PROVIDER_DEFERRED":
-                if step.get("symbol") != expected or step.get("checkpoint_advanced") is not False:
-                    raise SchedulerHalt("FMP_DEFERRED_INCONSISTENT")
-                result["fmp_deferred"].append(expected)
-            elif step.get("status") == "SOURCE_RETRYABLE":
-                result["fmp_stop_reason"] = "FMP_RETRYABLE_SOURCE"
-                break
-            elif step.get("status") == "FMP_QUEUE_EMPTY":
-                result["fmp_stop_reason"] = "FMP_QUEUE_EMPTY"
-                break
-            elif (
-                step.get("daily_symbol") == expected
-                and step.get("commit_status") == "COMMITTED"
-                and step.get("verify_status") == "PASS"
-                and step.get("checkpoint_status") == "COMMITTED_VERIFY_PASS"
-            ):
-                state = assert_state(client, token, day)
-                if expected not in (state.get("checkpoint", {}).get("completed_symbols") or []):
-                    raise SchedulerHalt("FMP_CHECKPOINT_MISMATCH")
-                result["fmp_verified"].append(expected)
-            else:
-                raise SchedulerHalt("UNKNOWN_FMP_STEP_RESULT")
-            sleep(1)
-        else:
-            result["fmp_stop_reason"] = "FMP_RUNTIME_BUDGET"
-
         assert_state(client, token, day)
         crypto_checkpoint(client, token, day)
         # The connected ChatGPT run cannot call protected Redis with a service
@@ -302,7 +319,7 @@ def main() -> int:
         output = run(client, token)
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0 if output["status"] in (
-        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_NEW_YORK_1600",
+        "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_NEW_YORK_PRECLOSE",
         "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN",
     ) else 1
 
