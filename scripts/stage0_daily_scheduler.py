@@ -126,9 +126,11 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
     phase_se = now.astimezone(STOCKHOLM)
     # 15:00 Stockholm last acquisition phase must finish before 15:45.
     # Keep 25 minutes spare for checkpoints, fresh quotes and analysis.
-    wall_cap = min(max_wall_seconds, (
-        PRECLOSE_MINUTES_AT_1500 * 60 if phase_se.hour == 15 else MAX_WALL_SECONDS
-    ))
+    # Reserve a non-overlap window for the next scheduled ingestion phase.
+    # Most calls are bounded at 300s, and each phase leaves >=10m margin.
+    phase_caps_seconds = {9: 75 * 60, 12: 75 * 60,
+                          14: 40 * 60, 15: PRECLOSE_MINUTES_AT_1500 * 60}
+    wall_cap = min(max_wall_seconds, phase_caps_seconds[phase_se.hour])
     result = {
         "version": VERSION,
         "utc_date": day,
