@@ -98,6 +98,22 @@ class ExistingFMPStage0Adapter:
             if "DEFERRED" in str(row.get("enrichment_status", "")).upper()
             or str(row.get("mandatory_broad_pass", "")).upper() in ("FALSE", "0")
         }
+        # SPY is the canonical same-day equity benchmark. Never borrow a
+        # stale 3m return from earlier run_id or other asset/currency.
+        benchmark_spy_return_3m = None
+        for item in snapshots:
+            if (
+                str(item.get("canonical_symbol", "")).upper() == "SPY"
+                and item.get("ranking_run_id") == self.run_id
+                and item.get("analysis_price_source") == "FMP_STABLE"
+            ):
+                try:
+                    candidate = float(item.get("return_3m"))
+                    if pd.notna(candidate):
+                        benchmark_spy_return_3m = candidate
+                except (ValueError, TypeError):
+                    pass
+                break
         priority.sort(key=lambda pair: (pair[0] not in deferred, pair[0]))
         if self.requested_symbols:
             known = {sym: item for sym, item in priority}
@@ -190,7 +206,15 @@ class ExistingFMPStage0Adapter:
             if result is None:
                 failed.append(f"{symbol}:MISSING_PROVIDER_RESULT")
                 continue
-            fields = result.get("fields") or {}
+            fields = dict(result.get("fields") or {})
+            if benchmark_spy_return_3m is not None and fields.get("return_3m") is not None:
+                from stage0_canonical_factors import relative_strength
+                try:
+                    fields["relative_strength_score"] = relative_strength(
+                        float(fields["return_3m"]), benchmark_spy_return_3m
+                    )
+                except (ValueError, TypeError, OverflowError):
+                    pass
             errors = result.get("provider_errors") or []
             success = result.get("enrichment_status") == "ACQUIRED_NOT_SCORED"
             urls = result.get("source_urls") or []
@@ -225,6 +249,10 @@ class ExistingFMPStage0Adapter:
                 "distance_20dma": fields.get("distance_ma20_pct"),
                 "distance_50dma": fields.get("distance_ma50_pct"),
                 "distance_200dma": fields.get("distance_ma200_pct"),
+                "momentum_score": fields.get("momentum_score"),
+                "trend_score": fields.get("trend_score"),
+                "relative_strength_score": fields.get("relative_strength_score"),
+                "volume_score": fields.get("volume_score"),
                 "missing_mandatory_fields": "; ".join(missing),
                 "missing_optional_fields": "NOT_EVALUATED",
                 "source_summary": source,
