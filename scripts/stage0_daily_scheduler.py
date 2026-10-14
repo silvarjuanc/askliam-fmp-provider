@@ -305,9 +305,15 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
 
 
 def main() -> int:
+    # Render may fire an additional UTC slot for European DST. Skip it
+    # WITHOUT requiring a service token or attempting a remote request.
+    if not schedule_gate(datetime.now(timezone.utc)):
+        print(json.dumps({"version": VERSION, "status": "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS",
+                          "wrote_data": False}))
+        return 0
     if os.getenv("ASKLIAM_CRON_ENABLED", "").lower() != "true":
         print(json.dumps({"version": VERSION, "status": "CRON_DISARMED", "wrote_data": False}))
-        return 0
+        return 2
     token = os.getenv("ASKLIAM_SERVICE_TOKEN", "")
     if not token:
         print(json.dumps({"version": VERSION, "status": "HALTED",
