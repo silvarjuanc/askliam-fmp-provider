@@ -1,0 +1,27 @@
+name: V6.5.1 Coinbase Spot Stage0 Tests
+on:
+  push:
+    branches:
+      - feature/v651-coinbase-spot-stage0-safe
+  pull_request:
+    paths:
+      - "stage0_crypto_coinbase*"
+      - "stage0_crypto_commit.py"
+      - "app.py"
+      - "test_stage0_crypto_coinbase*"
+      - ".github/workflows/v651-coinbase-stage0.yml"
+jobs:
+  crypto-stage0-offline:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Offline source and preparation tests
+        run: python -m unittest -v test_stage0_crypto_coinbase_spot test_stage0_crypto_coinbase_prepare
+      - name: Compile changed modules
+        run: python -m py_compile app.py stage0_crypto_coinbase_prepare.py stage0_crypto_coinbase_commit.py stage0_crypto_commit.py
