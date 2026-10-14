@@ -109,7 +109,7 @@ def audit_daily(universe, snapshots, specs, *, day, now=None):
             "state":state, "mandatory_missing":missing,
             "mandatory_coverage_pct":coverage, "quote_fresh":quote_fresh,
             "quote_observed_at_utc":observed.isoformat() if observed else None,
-            "source_quality_verified":False,  # not inferred from worksheet
+            "source_quality_verified":None,  # provenance not independently verified
             "ranking_permitted":False,
         })
 
@@ -137,11 +137,11 @@ def audit_daily(universe, snapshots, specs, *, day, now=None):
         "frequent_missing_mandatory_rules":dict(missing_rules),
         "acquired_sources":dict(acquired_sources),
         "details":details,
-        "provider_attempt_proven":False,
+        "provider_attempt_proven":"NOT_CHECKED",
         "redis_live_checked":False,
         "redis_pending":"UNVERIFIED",
         "fmp_quota":"UNVERIFIED",
-        "full_pipeline_committed":False,
+        "full_pipeline_committed":"UNVERIFIED",
         "ranking_permitted":False,
         "execution_permitted":False,
         "sheet_writes_performed":False,
