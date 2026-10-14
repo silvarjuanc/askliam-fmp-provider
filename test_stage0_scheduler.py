@@ -23,10 +23,23 @@ class SchedulerTests(unittest.TestCase):
         buffer = io.StringIO()
         with patch.dict(os.environ, {"ASKLIAM_CRON_ENABLED": "false",
                                     "ASKLIAM_SERVICE_TOKEN": ""}, clear=True):
-            with redirect_stdout(buffer):
-                exit_code = main()
-        self.assertEqual(exit_code, 0)
+            with patch("scripts.stage0_daily_scheduler.schedule_gate", return_value=True):
+                with redirect_stdout(buffer):
+                    exit_code = main()
+        self.assertEqual(exit_code, 2)
         self.assertIn("CRON_DISARMED", buffer.getvalue())
+
+    def test_off_window_without_credentials_is_safe_noop(self):
+        import io
+        from contextlib import redirect_stdout
+        buffer=io.StringIO()
+        with patch.dict(os.environ, {"ASKLIAM_CRON_ENABLED":"true",
+                                     "ASKLIAM_SERVICE_TOKEN":""}, clear=True):
+            with patch("scripts.stage0_daily_scheduler.schedule_gate",return_value=False):
+                with redirect_stdout(buffer):
+                    exit_code=main()
+        self.assertEqual(exit_code,0)
+        self.assertIn("NOT_SCHEDULED_STOCKHOLM_PREANALYSIS",buffer.getvalue())
 
     def test_stockholm_preanalysis_windows_across_europe_dst(self):
         # Stockholm windows 09:00, 12:00, 14:00, 15:00, regardless of US DST.
