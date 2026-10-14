@@ -504,6 +504,41 @@ async def _fmp_preclose_entitlement_probe_once():
         log.error("FMP_PRECLOSE_PROBE_HALTED exception=%s", type(exc).__name__)
 
 
+async def _run_fmp_equity_preclose_bootstrap_once():
+    """Date-scoped priority FMP Stage0 writer: pre-existing transactional API only."""
+    import logging
+    from stage0_batch import Stage0BatchCoordinator
+    from stage0_equity_preclose_bootstrap import bootstrap_priority_equities
+    log = logging.getLogger("uvicorn.error")
+    try:
+        if os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() != "true":
+            log.warning("FMP_EQUITY_BOOTSTRAP_HALTED code=STAGE0_DISABLED")
+            return
+        if provider.state is None:
+            log.warning("FMP_EQUITY_BOOTSTRAP_HALTED code=UPSTASH_UNAVAILABLE")
+            return
+        batch = Stage0BatchCoordinator(provider.state)
+        result = await bootstrap_priority_equities(
+            status_fn=batch.status,
+            plan_fn=stage0_daily_plan,
+            step_fn=stage0_daily_step,
+            now=datetime.now(timezone.utc),
+        )
+        log.info(
+            "FMP_EQUITY_BOOTSTRAP_RESULT status=%s committed=%s already=%s "
+            "sheet_readback=%s trades_written=0",
+            result["status"], ",".join(result.get("symbols_committed", [])) or "NONE",
+            ",".join(result.get("already_verified", [])) or "NONE",
+            result.get("sheets_commit_readback", False),
+        )
+    except Exception as exc:
+        from stage0_equity_preclose_bootstrap import BootstrapHalt
+        if isinstance(exc, BootstrapHalt):
+            log.error("FMP_EQUITY_BOOTSTRAP_HALTED code=%s", str(exc))
+        else:
+            log.error("FMP_EQUITY_BOOTSTRAP_HALTED class=%s", type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
@@ -518,9 +553,18 @@ async def lifespan(app: FastAPI):
     fmp_probe_task = None
     if os.getenv("ASKLIAM_FMP_PRECLOSE_PROBE_ONCE_DAY", "") == day_utc():
         fmp_probe_task = asyncio.create_task(_fmp_preclose_entitlement_probe_once())
+    equity_task = None
+    if os.getenv("ASKLIAM_FMP_EQUITY_BOOTSTRAP_ONCE_DAY", "") == day_utc():
+        equity_task = asyncio.create_task(_run_fmp_equity_preclose_bootstrap_once())
     try:
         yield
     finally:
+        if equity_task is not None and not equity_task.done():
+            equity_task.cancel()
+            try:
+                await equity_task
+            except asyncio.CancelledError:
+                pass
         if fmp_probe_task is not None and not fmp_probe_task.done():
             fmp_probe_task.cancel()
             try:
