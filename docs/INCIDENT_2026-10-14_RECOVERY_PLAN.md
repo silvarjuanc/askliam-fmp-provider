@@ -6,6 +6,7 @@
 - No 2026-10-14 global committed ranking / Run_Manifest / lifecycle decision.
 - Upstash checkpoint and three Stage0 Sheets writes are **not** interchangeable with analytical completion.
 - The live Render cron was scheduled at `0 20,21 * * 1-5` UTC and the Python driver enforced a New-York-local guard. This was wrong for the required Swedish analysis.
+- Render logs show repeated deploys/restarts around 12:17–13:29 UTC and repeating startup-triggered Stage0 FMP drain / recovery attempts. HTTP 503 errors at 12:12 and 12:43 UTC may coincide with this churn but exact upstream cause remains unproven. Date-only startup flags did not enforce once-per-day execution; a new explicit `ASKLIAM_STARTUP_ONESHOTS_ENABLED=true` gate, disabled by default, protects against restart-triggered work. Keep the override unset in routine production.
 - `stage0_fmp_adapter.py` explicitly avoids profile/fundamentals and does not calculate canonical macro factors. `stage0_ranking_preview.py` is intentionally read-only and publication-blocked. There is no completed Stage1/Stage2 production pipeline in this repo.
 
 ## Correct wall-clock contract
