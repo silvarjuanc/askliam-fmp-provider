@@ -6,6 +6,7 @@ conservative candidate list; unsupported models need their own live adapters.
 from __future__ import annotations
 from collections import Counter
 import json
+import os
 from stage0_ingestor import Stage0_Daily_Ingestor, Stage0Error
 
 ELIGIBLE_FMP_CLASSES = {"equity", "index", "fixed income etf", "index / etf / basket"}
@@ -89,12 +90,21 @@ def plan_from_universe(entries, status, *, batch_size=1):
     completed = set(status["checkpoint"].get("completed_symbols") or [])
     deferred = set(status.get("deferred_today") or {})
     blocked_402 = set(status.get("fmp_quote_402_cooldowns") or {})
+    # Operator-scoped 2026-10-14 quarantine ONLY for GE: a provider/workbook
+    # step halted with HTTP 503 and left a PREPARED journal. The journal was
+    # separately reconciled with 300 immutable legacy rows and no same-day
+    # snapshot. Do not let a repeated transient GE error starve 80+ others.
+    # This is NOT a provider deferral nor a valid completed checkpoint.
+    held = ({"GE"} if (
+        os.getenv("ASKLIAM_STAGE0_QUARANTINE_GE_UTC_DAY") == "2026-10-14"
+        and status.get("utc_date") == "2026-10-14"
+    ) else set())
     counters = Counter(item["route"] for item in entries)
     symbols_by_route = {route: [item["symbol"] for item in entries if item["route"] == route] for route in sorted(counters)}
     eligible = [item["symbol"] for item in entries if item["route"] == "FMP_CANDIDATE"]
     unattempted = [symbol for symbol in eligible if symbol not in completed and symbol not in deferred]
     cooldown_skipped = [symbol for symbol in unattempted if symbol in blocked_402]
-    pending = [symbol for symbol in unattempted if symbol not in blocked_402]
+    pending = [symbol for symbol in unattempted if symbol not in blocked_402 and symbol not in held]
     # Repeated Stage0 steps consume a verified Redis checkpoint. The order
     # MUST remain deterministic even if Universe/Sheets change row order.
     pending.sort(key=lambda s: (FMP_PRIORITY_RANK.get(s, len(FMP_PRIORITY_RANK)), s))
@@ -112,6 +122,9 @@ def plan_from_universe(entries, status, *, batch_size=1):
         "fmp_http402_cooldown_count": len(set(eligible) & blocked_402),
         "fmp_http402_skipped_today": len(cooldown_skipped),
         "fmp_http402_skipped_symbols": cooldown_skipped,
+        "fmp_operationally_held_symbols": sorted(held & set(unattempted)),
+        "fmp_operational_hold_reason": ("GE_PRIOR_PREWRITE_503_RECONCILED"
+                                        if held & set(unattempted) else "NONE"),
         "fmp_cooldowns_expire_at_utc": {
             sym: status["fmp_quote_402_cooldowns"][sym]
             for sym in cooldown_skipped
