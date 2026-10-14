@@ -1206,3 +1206,117 @@ async def stage0_check():
             "version": VERSION, "status": "CHECK_FAILED",
             "code": type(exc).__name__,
         }) from None
+
+# Coinbase spot ingestion is separated from existing native-perp checkpoints.
+# All writes disabled unless explicitly scoped in Render and authenticated.
+class CoinbaseSpotCommitRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+    confirmation: str = Field(min_length=8, max_length=100)
+
+
+@app.get("/stage0/crypto/coinbase-spot-ingest-preflight", dependencies=[Depends(require_token)])
+async def coinbase_spot_ingest_preflight(symbol: str):
+    """Real source + Sheets diff, but NO writes, checkpoint or ranking."""
+    from stage0_crypto_coinbase_commit import spot_preflight
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        return await spot_preflight(symbol.strip().upper(), redis=provider.state, client=provider.client)
+    except Stage0Error as exc:
+        raise HTTPException(409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "SPOT_SNAPSHOT_COLLISION"
+        ) else 503, {
+            "stage0_status": exc.status,
+            "sheet_writes_performed": False, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "COINBASE_SPOT_PREFLIGHT_HALTED") from None
+
+
+@app.post("/stage0/crypto/coinbase-spot-commit-one", dependencies=[Depends(require_token)])
+async def coinbase_spot_commit_one(request: CoinbaseSpotCommitRequest):
+    """Explicit, scoped opt-in transaction. Never ranks or places orders."""
+    from stage0_crypto_coinbase_commit import spot_commit_one
+    from stage0_ingestor import Stage0Error
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503, "SOURCE_UNAVAILABLE")
+    try:
+        return await spot_commit_one(
+            request.symbol, request.confirmation,
+            redis=provider.state, client=provider.client,
+        )
+    except Stage0Error as exc:
+        http = 403 if exc.status in (
+            "SPOT_WRITE_DISABLED", "SPOT_WRITE_SCOPE_DENIED",
+            "EXPLICIT_CONFIRMATION_REQUIRED"
+        ) else 409 if exc.status in (
+            "RECONCILIATION_REQUIRED", "SPOT_SNAPSHOT_COLLISION",
+            "ALREADY_COMMITTED_TODAY", "CONCURRENT_RUN_BLOCKED",
+            "CHECKPOINT_NOT_COMMITTED",
+        ) else 503
+        raise HTTPException(http, {
+            "stage0_status": exc.status, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, {
+            "stage0_status": "SPOT_COMMIT_HALTED",
+            "ranking_permitted": False, "execution_permitted": False,
+        }) from None
+
+
+@app.get("/stage0/crypto/coinbase-spot-checkpoint", dependencies=[Depends(require_token)])
+async def coinbase_spot_checkpoint(day: str, symbol: str):
+    """Independent Redis-only spot checkpoint reader; no provider calls."""
+    from stage0_crypto_coinbase_commit import spot_checkpoint_key
+    from stage0_crypto_coinbase_prepare import PRICE_SOURCE
+    from stage0_crypto_probe import COINGECKO_IDS
+    from stage0_batch import pending_key
+    from datetime import date
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        parsed = date.fromisoformat(day)
+        canonical = symbol.strip().upper()
+        if (
+            day != parsed.isoformat() or parsed > datetime.now(timezone.utc).date()
+            or canonical not in COINGECKO_IDS
+        ):
+            raise ValueError("Invalid day or symbol")
+    except (ValueError, TypeError):
+        raise HTTPException(422, "INVALID_DATE_OR_SYMBOL") from None
+    try:
+        raw = await provider.state.call("GET", spot_checkpoint_key(day))
+        pending = await provider.state.call("GET", pending_key(day))
+        if raw:
+            cp = json.loads(raw)
+            if (
+                cp.get("version") != VERSION or cp.get("utc_date") != day
+                or cp.get("provider") != PRICE_SOURCE
+                or cp.get("status") != "COMMITTED_VERIFY_PASS"
+                or not isinstance(cp.get("completed_symbols"), list)
+            ):
+                raise ValueError("Invalid stored spot checkpoint")
+            completed = cp["completed_symbols"]
+        else:
+            completed, cp = [], {}
+        return {
+            "version": VERSION, "utc_date": day, "symbol": canonical,
+            "status": cp.get("status", "NOT_FOUND"),
+            "symbol_completed": canonical in completed,
+            "symbol_checkpoint_verified": canonical in completed and not bool(pending),
+            "pending_reconciliation": bool(pending),
+            "last_verified_run_id": cp.get("last_verified_run_id"),
+            "sheet_writes_performed": False, "checkpoint_advanced": False,
+            "ranking_permitted": False, "execution_permitted": False,
+        }
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(409, "SPOT_CHECKPOINT_INVALID") from None
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
