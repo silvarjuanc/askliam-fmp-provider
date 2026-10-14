@@ -60,7 +60,7 @@ class DailyAuditTests(unittest.TestCase):
         self.assertEqual(result["eligible_quote_fresh_and_mandatory_count"],0)
         self.assertEqual(result["readiness_counts"]["ACQUIRED_INCOMPLETE"],19)
         self.assertEqual(result["readiness_counts"]["MANDATORY_COMPLETE_QUOTE_STALE"],2)
-        self.assertFalse(result["provider_attempt_proven"])
+        self.assertEqual(result["provider_attempt_proven"],"NOT_CHECKED")
         self.assertEqual(result["redis_pending"],"UNVERIFIED")
         self.assertFalse(result["ranking_permitted"])
         self.assertFalse(result["sheet_writes_performed"])
@@ -89,7 +89,7 @@ class DailyAuditTests(unittest.TestCase):
         snapshots[19]["data_timestamp"]="2026-10-14T13:44:00Z"
         result=audit_daily(universe,snapshots,SPECS,day="2026-10-14",now=ASOF)
         self.assertEqual(result["eligible_quote_fresh_and_mandatory_count"],1)
-        self.assertFalse(result["full_pipeline_committed"])
+        self.assertEqual(result["full_pipeline_committed"],"UNVERIFIED")
 
 if __name__=="__main__":
     unittest.main()
