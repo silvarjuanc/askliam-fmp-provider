@@ -7,11 +7,15 @@ RUN="STAGE0-20261014-V6.5.1"
 
 def history(symbol="SPY", model="INDEX_V1", source="FMP", validated=False):
     rows=[]
-    d=date(2025,1,2)
-    while len(rows)<270:
+    days=[]
+    d=date(2026,10,13)
+    while len(days)<270:
         if model=="CRYPTO_V1" or d.weekday()<5:
-            x=100+len(rows)*.25
-            rows.append({
+            days.append(d)
+        d-=timedelta(days=1)
+    for d in reversed(days):
+        x=100+len(rows)*.25
+        rows.append({
                 "ranking_run_id":"STAGE0-20261012-V6.5.1",
                 "canonical_symbol":symbol, "source":source,
                 "trading_date":d.isoformat(),
@@ -20,7 +24,6 @@ def history(symbol="SPY", model="INDEX_V1", source="FMP", validated=False):
                 "quality_status":("INDEPENDENT_SPOT_OHLCV_VALIDATED"
                     if validated else "RECEIVED_UNVERIFIED"),
             })
-        d+=timedelta(days=1)
     return rows
 
 
