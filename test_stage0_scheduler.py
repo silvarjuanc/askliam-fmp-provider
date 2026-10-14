@@ -17,6 +17,31 @@ WINTER = datetime(2026, 12, 14, 21, 0, tzinfo=UTC)
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_preclose_1000_gate_across_ny_dst(self):
+        summer = datetime(2026, 10, 14, 14, 0, tzinfo=UTC)
+        winter = datetime(2026, 12, 14, 15, 0, tzinfo=UTC)
+        self.assertTrue(schedule_gate(summer, phase="preclose_1000"))
+        self.assertTrue(schedule_gate(winter, phase="preclose_1000"))
+        self.assertFalse(schedule_gate(datetime(2026, 10, 14, 15, 0, tzinfo=UTC),
+                                       phase="preclose_1000"))
+        self.assertFalse(schedule_gate(datetime(2026, 12, 14, 14, 0, tzinfo=UTC),
+                                       phase="preclose_1000"))
+        self.assertFalse(schedule_gate(summer, phase="legacy_1600"))
+        self.assertFalse(schedule_gate(datetime(2026, 10, 17, 14, tzinfo=UTC),
+                                       phase="preclose_1000"))
+
+    def test_preclose_run_requires_early_window_no_network_elsewhere(self):
+        with patch("scripts.stage0_daily_scheduler.request") as rq:
+            out = run(object(), "fake", now=SUMMER, phase="preclose_1000")
+            self.assertEqual(out["status"], "NOT_SCHEDULED_NEW_YORK_1000")
+            rq.assert_not_called()
+
+    def test_invalid_phase_fails_closed(self):
+        with patch("scripts.stage0_daily_scheduler.request") as rq:
+            out = run(object(), "fake", now=SUMMER, phase="unconfigured")
+            self.assertEqual(out["status"], "INVALID_CRON_PHASE")
+            rq.assert_not_called()
+
     def test_disarmed_cron_does_not_require_credentials(self):
         import io
         from contextlib import redirect_stdout
