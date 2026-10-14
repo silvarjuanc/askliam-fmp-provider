@@ -75,7 +75,7 @@ def validate_candles(payload, symbol: str, now: datetime, min_bars=MIN_BARS):
         raise CoinbaseSpotError("COINBASE_STALE_HISTORY")
     prices = [bar["close"] for bar in bars]
     volumes = [bar["volume_base"] for bar in bars]
-    factors = canonical_technicals(prices, sessions_per_year=365)
+    factors = canonical_technicals(prices)
     avg_previous_20 = sum(volumes[-21:-1])/20
     factors["volume_score"] = volume_score(
         volumes[-1], avg_previous_20, source_verified=True,
