@@ -711,9 +711,42 @@ async def _jpm_postwrite_reconcile_once():
         logger.error("JPM_POSTWRITE_RECOVERY_HALTED class=%s",type(exc).__name__)
 
 
+async def _read_only_stage1_smoke_once():
+    """One date-scoped, Redis-deduped diagnostic; never a writer."""
+    from stage1_sheet_reader import load_and_preview
+    logger = __import__("logging").getLogger("uvicorn.error")
+    day = day_utc()
+    if provider.state is None:
+        logger.error("STAGE1_SMOKE_HALTED reason=REDIS_UNAVAILABLE")
+        return
+    try:
+        key = "askliam:v651:stage1:smoke:" + day
+        claim = await provider.state.call("SET", key, "STARTED", "NX", "EX", 86400)
+        if claim != "OK":
+            logger.info("STAGE1_SMOKE_ALREADY_ATTEMPTED day=%s",day)
+            return
+        # Does not access FMP or Hyperliquid; one bounded Sheets read.
+        result = await asyncio.to_thread(load_and_preview, ["SPY", "BTC"])
+        summary = [
+            str(x["symbol"])+":"+str(x.get("history_status"))+
+            "/missing="+str(len(x.get("mandatory_missing") or []))
+            for x in result["results"]
+        ]
+        logger.info("STAGE1_SMOKE_PASS version=%s day=%s scanned=%s results=%s "
+                    "ranking_permitted=false sheets_writes=false",
+                    VERSION,day,result["source_rows_examined"],",".join(summary))
+    except Exception as exc:
+        logger.error("STAGE1_SMOKE_HALTED error_class=%s",type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
+    # Read-only, Redis-deduplicated diagnostic opt-in. Never enables
+    # startup-triggered Stage0 writers, scoring, Lifecycle or trades.
+    stage1_smoke_task = None
+    if os.getenv("ASKLIAM_STAGE1_READONLY_SMOKE_UTC_DAY", "") == day_utc():
+        stage1_smoke_task = asyncio.create_task(_read_only_stage1_smoke_once())
     # Restarting/redeploying Render must NOT run Stage0 ingestion or recovery.
     # Historical once-date flags are never sufficient to authorize writes.
     # Only a separate deliberate maintenance override can allow them.
@@ -747,6 +780,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if stage1_smoke_task is not None and not stage1_smoke_task.done():
+            stage1_smoke_task.cancel()
+            try:
+                await stage1_smoke_task
+            except asyncio.CancelledError:
+                pass
         if jpm_recovery_task is not None and not jpm_recovery_task.done():
             jpm_recovery_task.cancel()
             try:
