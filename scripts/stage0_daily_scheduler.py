@@ -1,7 +1,11 @@
 """AskLiam V6.5.1 unattended Stage0 driver. No trading or Ranking.
 
-Invoke with Render Cron at '0 20,21 * * 1-5' UTC. The NY-local guard
-selects exactly 16:00 America/New_York across DST transitions.
+Preferred PRE-CLOSE Render Cron: '0 14,15 * * 1-5' UTC plus
+ASKLIAM_CRON_PHASE=preclose_1000. The NY-local guard selects exactly
+10:00 America/New_York across DST transitions, allowing preparation
+before the 16:00 New York analysis. The existing 16:00 gate is retained
+only for legacy compatibility until the Render schedule is updated.
+US current-session EOD bars are NOT considered final until >=16:20 ET.
 Environment: ASKLIAM_SERVICE_TOKEN (set ONCE on the cron service),
 ASKLIAM_BASE_URL (optional; hard-coded trusted default).
 Server must separately opt-in via ASKLIAM_STAGE0_AUTO_ENABLED and
@@ -34,12 +38,19 @@ class SchedulerHalt(RuntimeError):
     """Reason is a fixed, non-secret diagnostic code."""
 
 
-def schedule_gate(now: datetime) -> bool:
+def schedule_gate(now: datetime, *, phase: str = "legacy_1600") -> bool:
     if now.tzinfo is None:
         raise ValueError("timezone-aware UTC required")
     local = now.astimezone(NY)
-    # Tolerate reasonable cron startup delay without allowing a late rerun.
-    return local.weekday() < 5 and local.hour == 16
+    # Jobs run in UTC; the NY civil-clock guard avoids duplicate executions
+    # and DST drift when two UTC hours are configured in Render.
+    if local.weekday() >= 5:
+        return False
+    if phase == "preclose_1000":
+        return local.hour == 10
+    if phase == "legacy_1600":
+        return local.hour == 16
+    return False
 
 
 def safe_error(response: httpx.Response) -> str:
@@ -108,18 +119,24 @@ def crypto_checkpoint(client, token: str, day: str):
     return result
 
 
-def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_WALL_SECONDS):
+def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_WALL_SECONDS,
+        phase=None):
     now = now or datetime.now(timezone.utc)
-    if not schedule_gate(now):
-        return {"version": VERSION, "status": "NOT_SCHEDULED_NEW_YORK_1600",
-                "wrote_data": False}
+    phase = phase or os.getenv("ASKLIAM_CRON_PHASE", "legacy_1600")
+    if phase not in ("preclose_1000", "legacy_1600"):
+        return {"version": VERSION, "status": "INVALID_CRON_PHASE", "wrote_data": False}
+    if not schedule_gate(now, phase=phase):
+        return {"version": VERSION, "status": (
+                    "NOT_SCHEDULED_NEW_YORK_1000" if phase == "preclose_1000"
+                    else "NOT_SCHEDULED_NEW_YORK_1600"
+                ), "wrote_data": False}
     day = now.astimezone(timezone.utc).date().isoformat()
     run_id = "STAGE0-" + day.replace("-", "") + "-V6.5.1"
     started = time.monotonic()
     result = {
         "version": VERSION,
         "utc_date": day,
-        "scheduled_time": "16:00 America/New_York",
+        "scheduled_time": ("10:00" if phase == "preclose_1000" else "16:00") + " America/New_York",
         "status": "RUNNING",
         "crypto_verified": [],
         "crypto_previously_verified": [],
@@ -303,7 +320,7 @@ def main() -> int:
     print(json.dumps(output, sort_keys=True, separators=(",", ":")))
     return 0 if output["status"] in (
         "STAGE0_VERIFIED_OR_PROVIDER_DEFERRED", "NOT_SCHEDULED_NEW_YORK_1600",
-        "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN",
+        "NOT_SCHEDULED_NEW_YORK_1000", "BUDGET_EXHAUSTED_REMAINING_NEXT_RUN",
     ) else 1
 
 
