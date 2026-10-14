@@ -43,15 +43,17 @@ class TestPrecloseDrain(unittest.TestCase):
         self.assertFalse(out["trades_written"])
 
     def test_fmp_402_defer_advances_queue_not_checkpoint(self):
-        queue=["AAOI","SPY"];saved=[]
+        queue=["AAOI","SPY"];saved=[];held={}
         async def status(): return dict(version="V6.5.1",utc_date="2026-10-14",
             pending_reconciliation=False,quota=dict(remaining=200,blocked=False),
-            checkpoint=dict(completed_symbols=saved[:]))
+            checkpoint=dict(completed_symbols=saved[:]),deferred_today=dict(held))
         async def plan(): return dict(version="V6.5.1",utc_date="2026-10-14",
             pending_reconciliation=False,next_symbols=queue[:1])
         async def step():
             sym=queue.pop(0)
-            if sym=="AAOI":return dict(status="PROVIDER_DEFERRED",symbol=sym,checkpoint_advanced=False)
+            if sym=="AAOI":
+                held[sym]="fmp: FMP_HTTP_402"
+                return dict(status="PROVIDER_DEFERRED",symbol=sym,checkpoint_advanced=False)
             saved.append(sym);return dict(daily_symbol=sym,commit_status="COMMITTED",
                 verify_status="PASS",checkpoint_status="COMMITTED_VERIFY_PASS")
         out=asyncio.run(drain_fmp_preclose(status_fn=status,plan_fn=plan,

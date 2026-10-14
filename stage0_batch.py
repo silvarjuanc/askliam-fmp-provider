@@ -259,19 +259,36 @@ return redis.call('DEL', KEYS[2])
         return day, run_id, state["checkpoint"]
 
     def run_blocking(self, symbols, run_id):
-        ingestor = Stage0_Daily_Ingestor(
-            providers={"fmp": lambda: adapter()},
-            spreadsheet_id=self.spreadsheet_id,
-        )
-        ingestor.run_id = run_id
-        book = ingestor._open()
-        adapter = ExistingFMPStage0Adapter(
-            book, run_id,
-            max_symbols=len(symbols),
-            historical_budget=len(symbols),
-            symbols=symbols,
-        )
-        return ingestor.run()
+        ingestor = None
+        try:
+            ingestor = Stage0_Daily_Ingestor(
+                providers={"fmp": lambda: adapter()},
+                spreadsheet_id=self.spreadsheet_id,
+            )
+            ingestor.run_id = run_id
+            book = ingestor._open()
+            adapter = ExistingFMPStage0Adapter(
+                book, run_id,
+                max_symbols=len(symbols),
+                historical_budget=len(symbols),
+                symbols=symbols,
+            )
+            return ingestor.run()
+        except Stage0Error as exc:
+            # Only the ingestor's local write-started marker determines
+            # whether ANY Google Sheets write could have begun. Never infer
+            # safety merely from an HTTP status or journal PREPARED stage.
+            if ingestor is None or ingestor.write_started is False:
+                raise Stage0Error(
+                    "SAFE_PREWRITE_ABORTABLE", "SOURCE_OR_SHEETS_PREWRITE_" + exc.status
+                ) from None
+            raise
+        except Exception:
+            if ingestor is None or ingestor.write_started is False:
+                raise Stage0Error(
+                    "SAFE_PREWRITE_ABORTABLE", "SOURCE_OR_SHEETS_PREWRITE_EXCEPTION"
+                ) from None
+            raise
 
     async def finish(self, day, run_id, previous, symbols, result, token):
         if result.get("commit_status") != "COMMITTED" or result.get("verify_status") != "PASS":

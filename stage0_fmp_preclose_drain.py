@@ -79,12 +79,18 @@ async def drain_fmp_preclose(*, status_fn, plan_fn, step_fn,
         if symbol in good or symbol in skipped:
             raise DrainHalt("QUEUE_NOT_ADVANCING")
         step = await step_fn()
-        if step.get("status") == "PROVIDER_DEFERRED":
+        if step.get("status") in ("PROVIDER_DEFERRED","OPERATIONALLY_HELD"):
             if step.get("symbol") != symbol or step.get("checkpoint_advanced") is not False:
                 raise DrainHalt("DEFERRED_NOT_VERIFIED")
+            # The transactional route atomically marked the hold under Redis
+            # lease and deleted only the proven zero-write PREPARED journal.
+            checkpoint=await status_fn()
+            if (checkpoint.get("pending_reconciliation")
+                or symbol not in (checkpoint.get("deferred_today") or {})):
+                raise DrainHalt("DEFERRED_REDIS_HOLD_NOT_VERIFIED")
             skipped.append(symbol)
             if on_step:
-                on_step("DEFERRED", symbol)
+                on_step("OPERATIONALLY_HELD" if step["status"]=="OPERATIONALLY_HELD" else "DEFERRED",symbol)
             continue
         if step.get("status") == "SOURCE_RETRYABLE":
             if step.get("symbol") != symbol or step.get("checkpoint_advanced") is not False:

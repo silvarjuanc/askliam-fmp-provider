@@ -1531,6 +1531,20 @@ async def stage0_daily_step():
         try:
             result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id)
         except Stage0Error as exc:
+            if exc.status == "SAFE_PREWRITE_ABORTABLE":
+                # Stage0 ingestor proves it never crossed _commit.
+                # Exactly one Redis CAS under this lease atomically marks
+                # the symbol an OPERATIONAL hold and releases PREPARED.
+                # No provider failure is inferred; no FMP-402 cooldown seeded.
+                await batch.mark_deferred_prewrite(
+                    [symbol], "STAGE0_PREWRITE_RUNTIME_RETRYABLE", token
+                )
+                return {
+                    "version": VERSION, "status": "OPERATIONALLY_HELD",
+                    "symbol": symbol, "reason": exc.detail,
+                    "checkpoint_advanced": False, "ranking_permitted": False,
+                    "sheet_writes_performed": False,
+                }
             if exc.status == "PROVIDER_DEFERRED":
                 code = exc.detail.rsplit(": ", 1)[-1]
                 deferred_errors = {
