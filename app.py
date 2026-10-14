@@ -711,6 +711,38 @@ async def _jpm_postwrite_reconcile_once():
         logger.error("JPM_POSTWRITE_RECOVERY_HALTED class=%s",type(exc).__name__)
 
 
+async def _read_only_daily_audit_once():
+    """Redis-deduped and READ ONLY. No new Stage0 acquisitions."""
+    from stage1_sheet_reader import load_daily_audit
+    logger=__import__("logging").getLogger("uvicorn.error")
+    day=day_utc()
+    if provider.state is None:
+        logger.error("STAGE1_DAILY_AUDIT_HALTED error=UPSTASH_UNAVAILABLE")
+        return
+    try:
+        key="askliam:v651:stage1:daily_audit:"+day
+        acquired=await provider.state.call("SET",key,"RUNNING","NX","EX",86400)
+        if acquired!="OK":
+            logger.info("STAGE1_DAILY_AUDIT_ALREADY_ATTEMPTED day=%s",day)
+            return
+        result=await asyncio.to_thread(load_daily_audit)
+        logger.info(
+            "STAGE1_DAILY_AUDIT_PASS run=%s eligible=%s acquired=%s "
+            "eligible_acquired=%s excluded=%s missing=%s fmp_no_snapshot=%s "
+            "other_no_snapshot=%s mandatory_complete=%s quote_fresh_mandatory=%s "
+            "redis_checked=false ranking_permitted=false sheet_writes=false",
+            result["run_id"],result["ranking_eligible"],
+            result["stage0_snapshots"],result["stage0_eligible_acquired"],
+            ",".join(result["excluded_symbols"]) or "NONE",
+            result["eligible_without_current_snapshot"],
+            result["missing_snapshot_by_route"].get("FMP",0),
+            result["missing_snapshot_by_route"].get("OTHER",0),
+            result["mandatory_complete_count"],
+            result["eligible_quote_fresh_and_mandatory_count"])
+    except Exception as exc:
+        logger.error("STAGE1_DAILY_AUDIT_HALTED exception_class=%s",type(exc).__name__)
+
+
 async def _read_only_stage1_smoke_once():
     """One date-scoped, Redis-deduped diagnostic; never a writer."""
     from stage1_sheet_reader import load_and_preview
@@ -742,6 +774,9 @@ async def _read_only_stage1_smoke_once():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
+    audit_task = None
+    if os.getenv("ASKLIAM_STAGE1_AUDIT_SMOKE_UTC_DAY", "") == day_utc():
+        audit_task=asyncio.create_task(_read_only_daily_audit_once())
     # Read-only, Redis-deduplicated diagnostic opt-in. Never enables
     # startup-triggered Stage0 writers, scoring, Lifecycle or trades.
     stage1_smoke_task = None
@@ -780,6 +815,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        if audit_task is not None and not audit_task.done():
+            audit_task.cancel()
+            try:
+                await audit_task
+            except asyncio.CancelledError:
+                pass
         if stage1_smoke_task is not None and not stage1_smoke_task.done():
             stage1_smoke_task.cancel()
             try:
@@ -1893,3 +1934,23 @@ async def stage1_history_preview(symbols: str):
         raise HTTPException(409,"STAGE1_PREVIEW_INPUT_INVALID") from None
     except Exception:
         raise HTTPException(503,"STAGE1_PREVIEW_READ_HALTED") from None
+
+
+@app.get("/stage1/daily-audit", dependencies=[Depends(require_token)])
+async def stage1_daily_audit(day: str | None = None):
+    """Read-only reconciliation: exact Stage0 run, Universe eligibility, freshness.
+
+    Never queries the live Redis, modifies Sheets or authorizes trading.
+    """
+    from stage1_sheet_reader import load_daily_audit
+    from datetime import date
+    try:
+        requested=date.fromisoformat(day) if day else None
+    except ValueError:
+        raise HTTPException(422,"INVALID_AUDIT_DAY") from None
+    try:
+        return await asyncio.to_thread(load_daily_audit,day=requested)
+    except ValueError:
+        raise HTTPException(409,"AUDIT_CONTRACT_INVALID") from None
+    except Exception:
+        raise HTTPException(503,"AUDIT_SHEETS_READ_HALTED") from None
