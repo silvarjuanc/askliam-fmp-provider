@@ -97,3 +97,28 @@ def load_and_preview(symbols, *, today=None, opener=None):
     report["source_rows_examined"]=len(raw)
     report["workbook_reads"]="bounded_columns_plus_source_segments"
     return report
+
+
+
+def load_daily_audit(*, day=None, now=None, opener=None):
+    """Reconcile exactly today's canonical snapshot rows; never perform writes."""
+    from datetime import date
+    from stage1_run_audit import audit_daily
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("NAIVE_CLOCK")
+    if day is None:
+        day = now.astimezone(timezone.utc).date()
+    if isinstance(day, str):
+        day = date.fromisoformat(day)
+    if day > now.astimezone(timezone.utc).date():
+        raise ValueError("FUTURE_RUN_DAY")
+    if opener is None:
+        reader=Stage0_Daily_Ingestor(providers={"read_only":lambda:{}})
+        book=reader._open()
+    else:
+        book=opener()
+    universe=book.worksheet("Universe").get_all_records(numericise_ignore=["all"])
+    requirements=book.worksheet("Data_Requirements").get_all_records(numericise_ignore=["all"])
+    snapshots=book.worksheet("Market_Data_Snapshot").get_all_records(numericise_ignore=["all"])
+    return audit_daily(universe,snapshots,requirements,day=day,now=now)
