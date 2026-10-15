@@ -143,6 +143,8 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         "phase": {9: "MORNING_BACKFILL", 12: "MIDDAY_INCREMENTAL",
                   14: "AFTERNOON_INCREMENTAL", 15: "PREANALYSIS_FINALIZE"}[phase_se.hour],
         "status": "RUNNING",
+        "crypto_spot_verified": [],
+        "crypto_spot_deferred": [],
         "crypto_verified": [],
         "crypto_previously_verified": [],
         "crypto_spot_previously_verified": [],
@@ -175,6 +177,51 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         spot_existing = set(cp.get("spot_completed_symbols") or [])
         if not native_existing.issubset(CRYPTO) or not spot_existing.issubset(CRYPTO):
             raise SchedulerHalt("INVALID_CRYPTO_CHECKPOINT")
+
+        # BTC/ETH first: native-perp derivatives alone cannot provide
+        # mandatory Coinbase USD spot OHLCV and volume for CRYPTO_V1.
+        # Each spot step reuses the existing global Redis exclusive lease,
+        # durable PREPARED journal, Sheets readback and own checkpoint.
+        if config.get("coinbase_spot_auto_enabled") is True:
+            for symbol in ("BTC","ETH"):
+                if not budget_ok():
+                    break
+                assert_state(client,token,day)
+                cp_spot=request(
+                    client,"GET",
+                    "/stage0/crypto/coinbase-spot-checkpoint?day="+day+"&symbol="+symbol,
+                    token,
+                )
+                if (cp_spot.get("version")!=VERSION or cp_spot.get("utc_date")!=day
+                    or cp_spot.get("pending_reconciliation")):
+                    raise SchedulerHalt("SPOT_CHECKPOINT_UNVERIFIED")
+                if cp_spot.get("symbol_checkpoint_verified") is True:
+                    result["crypto_spot_previously_verified"].append(symbol)
+                    continue
+                try:
+                    response=request(client,"POST","/stage0/auto/coinbase-spot-step",token,
+                                     json_body={"symbol":symbol})
+                except SchedulerHalt as exc:
+                    if str(exc)=="PROVIDER_DEFERRED":
+                        result["crypto_spot_deferred"].append(symbol)
+                        continue
+                    # Never retry ambiguity; a POST may have written before
+                    # an upstream HTTP 502 or a web-service deployment.
+                    raise SchedulerHalt("SPOT_STEP_HALTED_"+str(exc)) from None
+                if (response.get("status")!="COMMITTED_VERIFY_PASS"
+                    or response.get("symbol")!=symbol or response.get("run_id")!=run_id
+                    or response.get("spot_checkpoint_updated") is not True
+                    or response.get("mandatory_fields_present")!=9):
+                    raise SchedulerHalt("SPOT_COMMIT_NOT_VERIFIED")
+                check=request(
+                    client,"GET",
+                    "/stage0/crypto/coinbase-spot-checkpoint?day="+day+"&symbol="+symbol,
+                    token,
+                )
+                if (check.get("symbol_checkpoint_verified") is not True
+                    or check.get("last_verified_run_id")!=run_id):
+                    raise SchedulerHalt("SPOT_CHECKPOINT_MISMATCH")
+                result["crypto_spot_verified"].append(symbol)
 
         # Equities/index ETFs (96 eligible) are the immediate blocking route.
         # Give FMP the first bounded opportunity before crypto fallbacks.
