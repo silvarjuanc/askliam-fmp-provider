@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 
 BASE="https://askliam-fmp-provider.onrender.com/stage0/scheduler/wake"
-ALLOWED={"PHASE_ACCEPTED","PHASE_ALREADY_CLAIMED",
+ALLOWED={"PHASE_ACCEPTED","PHASE_SAFE_RETRY_ACCEPTED","PHASE_ALREADY_CLAIMED",
          "NOT_SCHEDULED_STOCKHOLM_PREANALYSIS"}
 
 
