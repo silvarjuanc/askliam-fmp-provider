@@ -39,7 +39,10 @@ def _safe_journal(raw, now):
     """Parse only v6.5.1 FMP single-symbol witnesses; no guessing."""
     try:
         j = json.loads(raw)
-        stamp = datetime.fromisoformat(j["created_at"]).astimezone(timezone.utc)
+        stamp = datetime.fromisoformat(j["created_at"])
+        if stamp.tzinfo is None:
+            return None, "INVALID_CREATION_TIMESTAMP"
+        stamp = stamp.astimezone(timezone.utc)
         day = stamp.date().isoformat()
         symbols = j["symbols"]
         if (j.get("version") != "V6.5.1"
