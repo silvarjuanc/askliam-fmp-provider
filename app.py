@@ -861,7 +861,6 @@ async def _read_only_stage1_smoke_once():
         logger.error("STAGE1_SMOKE_HALTED error_class=%s",type(exc).__name__)
 
 
-@asynccontextmanager
 async def _recover_tsla_legacy_prewrite_once():
     """Opt-in exact journal repair; never touches market history or trades."""
     import logging
@@ -881,6 +880,7 @@ async def _recover_tsla_legacy_prewrite_once():
         local_log.error("TSLA_PREWRITE_RECOVERY_HALTED reason=%s", reason)
 
 
+@asynccontextmanager
 async def lifespan(app: FastAPI):
     import logging
     boot_log = logging.getLogger("uvicorn.error")
