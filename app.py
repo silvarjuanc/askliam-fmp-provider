@@ -1039,6 +1039,24 @@ async def stage0_reconciliation_inspect():
         raise HTTPException(503, "RECONCILIATION_INSPECTION_UNAVAILABLE") from None
 
 
+@app.post("/stage0/reconciliation/auto-recover", dependencies=[Depends(require_token)])
+async def stage0_reconciliation_auto_recover():
+    """Restore FMP progress only with exact durable SHA256 + Sheets readback.
+
+    Legacy, partial or conflicting journals remain untouched. No replay of
+    uncertain OHLCV and no ranking/execution actions are performed here.
+    """
+    from stage0_fmp_auto_recover import recover_verified_journal
+    if provider.state is None:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE")
+    try:
+        return await recover_verified_journal(provider.state)
+    except StorageError:
+        raise HTTPException(503, "UPSTASH_UNAVAILABLE") from None
+    except Exception:
+        raise HTTPException(503, "AUTO_RECOVERY_UNAVAILABLE") from None
+
+
 class Stage0PrewriteRecoveryRequest(BaseModel):
     symbol: str = Field(min_length=1, max_length=40)
     run_id: str = Field(min_length=10, max_length=100)
@@ -1143,7 +1161,7 @@ async def stage0_run(request: Stage0RunRequest):
     try:
         token = await batch.acquire()
         day, run_id, checkpoint = await batch.prepare(symbols, token)
-        result = await asyncio.to_thread(batch.run_blocking, symbols, run_id)
+        result = await asyncio.to_thread(batch.run_blocking, symbols, run_id, day, token, asyncio.get_running_loop())
         # No cursor promotion until Redis has acknowledged the durable
         # checkpoint, with lock ownership checked atomically in Lua.
         return await batch.finish(day, run_id, checkpoint, symbols, result, token)
@@ -1775,7 +1793,7 @@ async def stage0_daily_step():
         symbol = plan["next_symbols"][0]
         day, run_id, previous = await batch.prepare([symbol], token)
         try:
-            result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id)
+            result = await asyncio.to_thread(batch.run_blocking, [symbol], run_id, day, token, asyncio.get_running_loop())
         except Stage0Error as exc:
             if exc.status == "SAFE_PREWRITE_RETRYABLE":
                 # Exact origin certified by Stage0_Daily_Ingestor.write_attempted.
