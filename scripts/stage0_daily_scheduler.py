@@ -109,6 +109,15 @@ def assert_state(client, token: str, day: str) -> dict:
         # reads back all three Stage0 tabs. No ambiguous write is replayed.
         recovery = request(client, "POST",
                            "/stage0/reconciliation/auto-recover", token)
+        # Emit non-secret reason codes for Render log diagnostics.
+        status_code = str(recovery.get("status") or "UNKNOWN")
+        reason_code = str(recovery.get("reason") or "NONE")
+        if (status_code.isupper() and status_code.replace("_", "").isalnum()
+            and reason_code.isupper() and reason_code.replace("_", "").isalnum()):
+            print(json.dumps({"event": "V651_STAGE0_RECOVERY",
+                              "status": status_code, "reason": reason_code,
+                              "changed": recovery.get("changed") is True}))
+
         if recovery.get("status") in (
             "RECOVERED_VERIFIED_NO_WRITE", "RECOVERED_COMMITTED_VERIFY_PASS",
             "NO_PENDING_JOURNAL",
