@@ -15,6 +15,30 @@ COINBASE_TICKERS={"BTC":"BTC-USD","ETH":"ETH-USD"}
 COINBASE_BASE="https://api.exchange.coinbase.com/products/"
 
 
+def fmp_source_time(value):
+    """FMP stable /quote timestamp is Unix seconds, NOT fetch-time ISO.
+
+    Some FMP endpoints emit milliseconds. Neither missing nor invalid
+    source timestamps may inherit a fresh HTTP retrieval timestamp.
+    """
+    from math import isfinite
+    if isinstance(value,bool) or value is None:
+        return None
+    try:
+        n=float(value)
+        if not isfinite(n) or n<=0:
+            return None
+        if n>1e11:
+            n/=1000
+        observed=datetime.fromtimestamp(n,tz=timezone.utc)
+        if observed.year<2000:
+            return None
+        return observed.isoformat()
+    except (ValueError,TypeError,OverflowError,OSError):
+        return None
+
+
+
 def accept_quote(symbol,source,price,observed_at,now,source_url):
     p=numeric(price)
     ts=parse_utc(observed_at)
@@ -65,7 +89,7 @@ async def acquire_live_quotes(symbols, *,client,fmp_get,now=None):
                 return {"symbol":symbol,"status":"FMP_SYMBOL_MISMATCH",
                         "quote_fresh_15m":False,"execution_permitted":False}
             return accept_quote(symbol,"FMP_STABLE",d.get("price"),
-                                body.get("data_timestamp"),now,
+                                fmp_source_time(d.get("timestamp")),now,
                                 body.get("source_url_template",
                                          "https://financialmodelingprep.com/stable/quote?symbol="+symbol))
         except Exception:
