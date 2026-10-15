@@ -1,6 +1,6 @@
 import unittest
 from datetime import datetime,timedelta,timezone
-from stage1_live_quotes import accept_quote,acquire_live_quotes,enrich_readiness
+from stage1_live_quotes import accept_quote,acquire_live_quotes,enrich_readiness,fmp_source_time
 
 NOW=datetime(2026,10,15,14,0,tzinfo=timezone.utc)
 
@@ -14,7 +14,8 @@ class Client:
     async def get(self,url,timeout):return Response(self.ticker)
 
 async def fmp_get(kind,symbol):
-    return {"status":"READY","data":{"symbol":symbol,"price":200.25},
+    return {"status":"READY","data":{"symbol":symbol,"price":200.25,
+                                      "timestamp":int(NOW.timestamp())},
             "data_timestamp":NOW.isoformat(),
             "source_url_template":"https://financialmodelingprep.com/stable/quote?symbol="+symbol}
 
@@ -63,6 +64,29 @@ class LiveQuoteTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["results"][1]["live_broad_input_ready"])
         self.assertFalse(result["ranking_permitted"])
         self.assertFalse(result["sheet_writes_performed"])
+
+    def test_fmp_source_timestamp_is_not_fetch_timestamp(self):
+        from datetime import timedelta
+        source=(NOW-timedelta(minutes=33))
+        observed=fmp_source_time(int(source.timestamp()))
+        self.assertEqual(observed,source.isoformat())
+        q=accept_quote("AAPL","FMP_STABLE",202,observed,NOW,
+            "https://financialmodelingprep.com/stable/quote?symbol=AAPL")
+        self.assertFalse(q["quote_fresh_15m"])
+        self.assertIsNone(q["price"])
+        self.assertIsNone(fmp_source_time(None))
+        self.assertIsNone(fmp_source_time("bad"))
+        self.assertEqual(fmp_source_time(int(NOW.timestamp()*1000)),
+                         NOW.isoformat())
+
+    async def test_fmp_without_source_time_is_not_fresh(self):
+        async def source_missing_timestamp(kind,symbol):
+            return {"status":"READY","data":{"symbol":symbol,"price":250},
+                    "data_timestamp":NOW.isoformat()}
+        out=await acquire_live_quotes(["AAPL"],client=Client({}),
+                                      fmp_get=source_missing_timestamp,now=NOW)
+        self.assertFalse(out["quotes"][0]["quote_fresh_15m"])
+        self.assertEqual(out["quotes"][0]["status"],"LIVE_QUOTE_UNVERIFIED")
 
     def test_stale_coinbase_does_not_promote(self):
         result=accept_quote("ETH","COINBASE_EXCHANGE_SPOT_USD",200,
