@@ -2009,3 +2009,28 @@ async def stockholm_scheduler_status():
         except (StorageError,ValueError,TypeError):
             result["phase_result"]="REDIS_UNAVAILABLE"
     return result
+
+
+@app.get("/stage1/live-preview", dependencies=[Depends(require_token)])
+async def stage1_live_preview(symbols: str):
+    """Current underlying ticker + prior closed EOD, NO portfolio writes."""
+    from stage1_sheet_reader import load_and_preview
+    from stage1_live_quotes import acquire_live_quotes,enrich_readiness
+    tokens=[s.strip().upper() for s in symbols.split(",")]
+    if (not tokens or len(tokens)>10 or len(set(tokens))!=len(tokens) or
+        any(not SYMBOL_PATTERN.fullmatch(s) for s in tokens)):
+        raise HTTPException(422,"INVALID_LIVE_PREVIEW_SYMBOLS")
+    if provider.client is None or provider.state is None:
+        raise HTTPException(503,"LIVE_PROVIDERS_NOT_CONFIGURED")
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
+        raise HTTPException(503,"STAGE1_SHEETS_NOT_CONFIGURED")
+    try:
+        analytical,quotes=await asyncio.gather(
+            asyncio.to_thread(load_and_preview,tokens),
+            acquire_live_quotes(tokens,client=provider.client,fmp_get=provider.get),
+        )
+        return enrich_readiness(analytical,quotes)
+    except ValueError:
+        raise HTTPException(409,"LIVE_PREVIEW_CONTRACT_INVALID") from None
+    except Exception:
+        raise HTTPException(503,"LIVE_PREVIEW_HALTED") from None
