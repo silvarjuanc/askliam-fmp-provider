@@ -22,6 +22,19 @@ ROOT = "https://financialmodelingprep.com"
 CAP = 240
 
 TTL = {"quote": 900, "profile": 604800, "historical": 86400, "fundamental": 604800}
+FMP_FUNDAMENTAL_402_OBSERVED="askliam:v651:fmp:ratios_ttm:entitlement_observed"
+FMP_FUNDAMENTAL_402_BLOCKED="askliam:v651:fmp:ratios_ttm:entitlement_blocked"
+FMP_FUNDAMENTAL_ENTITLEMENT_TTL=7*86400
+FMP_FUNDAMENTAL_402_LUA = """
+redis.call('SADD', KEYS[1], ARGV[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+local n=redis.call('SCARD', KEYS[1])
+if n>=2 then
+  redis.call('SET', KEYS[2], 'HTTP_402', 'EX', tonumber(ARGV[2]))
+end
+return n
+"""
+
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -220,6 +233,14 @@ class Provider:
         if cache is not None:
             self.cache_hits += 1
             return {"status": "READY", "cache_hit": True, **cache}
+        if kind == "fundamental":
+            try:
+                blocked = await self.state.call("GET",FMP_FUNDAMENTAL_402_BLOCKED)
+            except StorageError:
+                return {"status":"PROVIDER_DEFERRED","error":"REDIS_UNAVAILABLE"}
+            if blocked == "HTTP_402":
+                return {"status":"PROVIDER_DEFERRED",
+                        "error":"FMP_TTM_ENDPOINT_ENTITLEMENT_402"}
         if not os.environ.get("FMP_API_KEY"):
             return {"status": "PROVIDER_DEFERRED", "error": "MISSING_FMP_API_KEY"}
         async with self.lock:
@@ -276,6 +297,19 @@ class Provider:
                 except StorageError:
                     pass  # Redis outage still causes quota reservation to fail closed.
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_HTTP_429"}
+            if response.status_code == 402 and kind == "fundamental":
+                # A single unsupported symbol does not prove a global
+                # entitlement failure. Two DISTINCT TTM symbols returning
+                # HTTP402 trigger a seven-day endpoint-specific cooldown.
+                try:
+                    await self.state.eval(
+                        FMP_FUNDAMENTAL_402_LUA,
+                        [FMP_FUNDAMENTAL_402_OBSERVED,FMP_FUNDAMENTAL_402_BLOCKED],
+                        [symbols,FMP_FUNDAMENTAL_ENTITLEMENT_TTL],
+                    )
+                except StorageError:
+                    pass
+                return {"status":"PROVIDER_DEFERRED","error":"FMP_HTTP_402"}
             if response.status_code >= 400:
                 return {"status": "PROVIDER_DEFERRED", "error": "FMP_HTTP_403_KEY_OR_PLAN" if response.status_code == 403 else f"FMP_HTTP_{response.status_code}"}
             try:
