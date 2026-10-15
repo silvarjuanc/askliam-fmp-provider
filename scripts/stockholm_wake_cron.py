@@ -34,9 +34,18 @@ def fire(url=BASE, token=None, opener=urllib.request.urlopen):
         return {"status":"WAKE_TRANSPORT_FAILED","error_class":type(e).__name__}
     if not isinstance(doc,dict):
         return {"status":"WAKE_INVALID_RESPONSE"}
+    prior=doc.get("prior_result") or {}
+    safe_status=str(prior.get("status","NONE"))
+    safe_reason=str(prior.get("halt_reason","NONE"))
+    import re
+    if not re.fullmatch(r"[A-Z0-9_]{1,96}",safe_status):
+        safe_status="REDACTED"
+    if not re.fullmatch(r"[A-Z0-9_]{1,96}",safe_reason):
+        safe_reason="REDACTED"
     return {"status":doc.get("status","UNKNOWN"),
             "phase":doc.get("phase"),
-            "accepted":doc.get("accepted",False)}
+            "accepted":doc.get("accepted",False),
+            "prior_status":safe_status,"prior_halt_reason":safe_reason}
 
 
 if __name__=="__main__":
