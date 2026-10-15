@@ -3,7 +3,7 @@ from datetime import datetime,timezone
 from unittest.mock import AsyncMock,Mock,patch
 from stage0_crypto_coinbase_commit import (spot_automation_guard,confirm_spot,spot_commit_one)
 from stage0_ingestor import Stage0Error
-from scripts.stage0_daily_scheduler import run,VERSION,CRYPTO
+from scripts.stage0_daily_scheduler import run,VERSION,CRYPTO,SchedulerHalt
 
 UTC=timezone.utc
 AT=datetime(2026,10,15,10,0,tzinfo=UTC)
@@ -63,7 +63,8 @@ class CryptoAutoSpotTests(unittest.TestCase):
                         "run_id":"STAGE0-20261015-V6.5.1",
                         "spot_checkpoint_updated":True,"mandatory_fields_present":9}
             if path=="/stage0/auto/crypto-step":
-                raise AssertionError("Native perp snapshot would overwrite independent spot")
+                self.assertNotIn(json_body["symbol"],("BTC","ETH"))
+                raise SchedulerHalt("PROVIDER_DEFERRED")
             if path=="/stage0/auto/runtime-evidence-sync":
                 return {"version":VERSION,"sync_status":"COMMITTED_VERIFY_PASS",
                         "spot_verified":sorted(completed)}
@@ -72,7 +73,7 @@ class CryptoAutoSpotTests(unittest.TestCase):
             out=run(object(),"token",now=AT,sleep=lambda _:None)
         self.assertEqual(out["status"],"STAGE0_VERIFIED_OR_PROVIDER_DEFERRED")
         self.assertEqual(set(out["crypto_spot_verified"]),{"BTC","ETH"})
-        self.assertEqual(len([x for x in ordered if x[1]=="/stage0/auto/crypto-step"]),0)
+        self.assertEqual(len([x for x in ordered if x[1]=="/stage0/auto/crypto-step"]),6)
         self.assertFalse(out["ranking_permitted"])
 
 if __name__=="__main__":unittest.main()
