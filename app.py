@@ -21,7 +21,7 @@ VERSION = "V6.5.1"
 ROOT = "https://financialmodelingprep.com"
 CAP = 240
 
-TTL = {"quote": 900, "profile": 604800, "historical": 86400}
+TTL = {"quote": 900, "profile": 604800, "historical": 86400, "fundamental": 604800}
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -183,6 +183,7 @@ class Query(BaseModel):
     include_profiles: bool = True
     include_historical: bool = False
     historical_budget: int = Field(default=0, ge=0, le=240)
+    include_fundamentals: bool = False
 
 
 
@@ -208,7 +209,7 @@ class Provider:
         if self.client:
             await self.client.aclose()
 
-    async def get(self, kind: Literal["quote", "profile", "historical"], symbols: str):
+    async def get(self, kind: Literal["quote", "profile", "historical", "fundamental"], symbols: str):
         if not self.state:
             return {"status": "PROVIDER_DEFERRED", "error": "PERSISTENT_STATE_UNAVAILABLE"}
         key = key_for(kind, symbols)
@@ -256,8 +257,11 @@ class Provider:
             elif kind == "profile":
                 endpoint = "/stable/profile"
                 query_params = {"symbol": symbols}
-            else:
+            elif kind == "historical":
                 endpoint = "/stable/historical-price-eod/full"
+                query_params = {"symbol": symbols}
+            else:
+                endpoint = "/stable/ratios-ttm"
                 query_params = {"symbol": symbols}
             safe_params = dict(query_params)
             query_params["apikey"] = os.environ.get("FMP_API_KEY")
@@ -314,6 +318,26 @@ class Provider:
         if query.include_historical and query.historical_budget:
             selected = symbols[:query.historical_budget]
             history = dict(zip(selected, await asyncio.gather(*(self.get("historical", symbol) for symbol in selected))))
+        fundamentals = {}
+        if query.include_fundamentals:
+            # Last in request order: protect the global FMP quota reserve.
+            # Source permission failures are retained as missing fundamentals,
+            # never converted into a failed price/history acquisition.
+            for symbol in symbols:
+                # No ratios request after price/history failure: preserve quota.
+                q_ready=(qmap.get(symbol) or {}).get("status")=="READY"
+                h_expected=query.include_historical and symbol in history
+                h_ready=not h_expected or (history.get(symbol) or {}).get("status")=="READY"
+                if not q_ready or not h_ready:
+                    fundamentals[symbol]={"status":"PROVIDER_DEFERRED",
+                                           "error":"FMP_FUNDAMENTAL_PREREQUISITE_MISSING"}
+                    continue
+                quota = await self.state.quota() if self.state else None
+                if not quota or quota.get("blocked") or int(quota.get("remaining",0)) <= 40:
+                    fundamentals[symbol] = {"status":"PROVIDER_DEFERRED",
+                                             "error":"FMP_FUNDAMENTAL_QUOTA_RESERVE"}
+                else:
+                    fundamentals[symbol] = await self.get("fundamental",symbol)
         rows = []
         for symbol in symbols:
             q, p, h = qmap.get(symbol), pmap.get(symbol), history.get(symbol)
@@ -361,6 +385,16 @@ class Provider:
                     fields.update(technicals(confirmed))
                 except (ValueError, TypeError, KeyError):
                     history_semantic_error = "FMP_HISTORICAL_EMPTY"
+            from stage0_fmp_fundamental_factors import extract_ttm
+            fundamental = fundamentals.get(symbol)
+            fundamental_evidence = {"fundamental_factor_count":None,
+                                    "fundamental_ratios":{}, "status":"NOT_REQUESTED"}
+            if fundamental and fundamental.get("status") == "READY":
+                fundamental_evidence = extract_ttm(
+                    symbol,fundamental.get("data"),fundamental.get("data_timestamp")
+                )
+                if fundamental_evidence.get("fundamental_factor_count") is not None:
+                    fields["fundamental_factor_count"] = fundamental_evidence["fundamental_factor_count"]
             errors = [v["error"] for v in (q, p, h) if v and v.get("error")]
             if history_semantic_error:
                 errors.append(history_semantic_error)
@@ -368,8 +402,13 @@ class Provider:
                 errors.append(errors_profile)
             rows.append({"canonical_symbol": symbol, "enrichment_status": "PROVIDER_DEFERRED" if errors else "ACQUIRED_NOT_SCORED",
                          "source": "FMP", "data_timestamp": now_utc(),
-                         "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h) if v and v.get("source_url_template"))),
+                         "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h,fundamental) if v and v.get("source_url_template"))),
                          "fields": {k:v for k,v in fields.items() if v is not None}, "provider_errors": errors,
+                         "fundamental_evidence": fundamental_evidence,
+                         "fundamental_provider_status": (
+                             fundamental.get("status") if fundamental else "NOT_REQUESTED"),
+                         "fundamental_provider_error": (
+                             fundamental.get("error") if fundamental else None),
                          "historical": h["data"] if h and h["status"] == "READY" else None})
         try:
             quota = await self.state.quota() if self.state else None

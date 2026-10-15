@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 import pandas as pd
 from stage0_equity_session_gate import partition_confirmed_bars
+from stage0_fmp_fundamental_factors import serialized_evidence
 
 
 def provider_failure_code(errors):
@@ -208,6 +209,9 @@ class ExistingFMPStage0Adapter:
                     json={
                         "symbols": [symbol],
                         "include_profiles": False,
+                        "include_fundamentals": (
+                            str(selected[index][1].get("Asset Class","")).lower() == "equity"
+                        ),
                         "include_historical": index < self.historical_budget,
                         "historical_budget": 1 if index < self.historical_budget else 0,
                     },
@@ -283,6 +287,10 @@ class ExistingFMPStage0Adapter:
                 "trend_score": fields.get("trend_score"),
                 "relative_strength_score": fields.get("relative_strength_score"),
                 "volume_score": fields.get("volume_score"),
+                "fundamental_factor_count": fields.get("fundamental_factor_count"),
+                "factor_evidence_json": serialized_evidence(
+                    result.get("fundamental_evidence") or {}
+                ),
                 "missing_mandatory_fields": "NOT_EVALUATED",
                 "missing_optional_fields": "NOT_EVALUATED",
                 "source_summary": source,
