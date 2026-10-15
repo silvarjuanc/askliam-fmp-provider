@@ -80,8 +80,11 @@ async def run_phase(redis, phase, now):
                              json.dumps(summary,separators=(",",":")),"EX",CRON_STATUS_TTL)
         except Exception:
             LOG.error("STOCKHOLM_PHASE_RESULT_REDIS_UNAVAILABLE phase=%s",phase)
-        LOG.info("STOCKHOLM_PHASE_FINISHED phase=%s status=%s fmp_verified=%s crypto_verified=%s",
-                 phase,status,summary["fmp_verified"],summary["crypto_verified"])
+        import re
+        reason=summary.get("halt_reason") or "NONE"
+        reason=reason if re.fullmatch(r"[A-Z0-9_]{1,96}",str(reason)) else "REASON_REDACTED"
+        LOG.info("STOCKHOLM_PHASE_FINISHED phase=%s status=%s reason=%s fmp_verified=%s crypto_verified=%s",
+                 phase,status,reason,summary["fmp_verified"],summary["crypto_verified"])
     except Exception as exc:
         LOG.error("STOCKHOLM_PHASE_HALTED phase=%s error_class=%s",phase,type(exc).__name__)
         try:
@@ -104,8 +107,17 @@ async def accepted_wake(redis, now, *, create_task=asyncio.create_task):
     phase=phase_for(now)
     claimed=await redis.call("SET",attempt_key(phase),"STARTED","NX","EX",CRON_STATUS_TTL)
     if claimed!="OK":
+        # The prior result is a sanitized runtime diagnostic, not a replay
+        # permission. It can be returned only to the wake-token holder.
+        raw=await redis.call("GET",result_key(phase))
+        prior=None
+        if raw:
+            try:
+                prior=json.loads(raw)
+            except (ValueError,TypeError):
+                prior={"status":"RESULT_UNREADABLE"}
         return {"version":VERSION,"status":"PHASE_ALREADY_CLAIMED",
-                "phase":phase,"accepted":False}
+                "phase":phase,"accepted":False,"prior_result":prior}
     create_task(run_phase(redis,phase,now))
     LOG.info("STOCKHOLM_PHASE_ACCEPTED phase=%s",phase)
     return {"version":VERSION,"status":"PHASE_ACCEPTED","phase":phase,
