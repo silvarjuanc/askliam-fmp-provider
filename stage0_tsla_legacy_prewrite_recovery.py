@@ -15,11 +15,11 @@ from stage0_reconcile import RECOVERY_GRACE_SECONDS
 
 DAY="2026-10-15"
 SYMBOL="TSLA"
-RUN_ID="STATSLA0-20261014-V6.5.1"
+RUN_ID="STAGE0-20261015-V6.5.1"
 LUA="""
-if redis.call('TSLAT', KEYS[1]) ~= ARGV[1] then return 0 end
-if redis.call('TSLAT', KEYS[2]) ~= ARGV[2] then return 0 end
-if (redis.call('TSLAT', KEYS[3]) or '') ~= ARGV[3] then return 0 end
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+if (redis.call('GET', KEYS[3]) or '') ~= ARGV[3] then return 0 end
 return redis.call('DEL', KEYS[2])
 """
 
@@ -38,20 +38,21 @@ def old_history_is_immutable(history,snapshots,created):
     if snapshots or len(history)!=301:
         return False
     unique=set()
-    old_runs={"STAGE0-20261012-V6.5.1":0,"STAGE0-20261014-V6.5.1":0}
-    daily_dates=set()
+    run_counts={"STAGE0-20261012-V6.5.1":0,
+                "STAGE0-20261014-V6.5.1":0}
+    latest_dates=set()
     for row in history:
         if (str(row.get("canonical_symbol","")).upper()!=SYMBOL
             or str(row.get("source","")).upper()!="FMP"
             or row.get("ranking_run_id")==RUN_ID
-            or not str(row.get("ranking_run_id","")).startswith("STATSLA0-20261012")
+            or row.get("ranking_run_id") not in run_counts
             or not row.get("trading_date")
             or not row.get("close")
             or str(row.get("quality_status",""))!="RECEIVED_UNVERIFIED"):
             return False
-        old_runs[row["ranking_run_id"]]+=1
+        run_counts[row["ranking_run_id"]]+=1
         if row["ranking_run_id"]=="STAGE0-20261014-V6.5.1":
-            daily_dates.add(row.get("trading_date"))
+            latest_dates.add(row["trading_date"])
         key=(row.get("canonical_symbol"),row.get("trading_date"),row.get("source"))
         if key in unique:
             return False
@@ -62,9 +63,9 @@ def old_history_is_immutable(history,snapshots,created):
                 return False
         except (ValueError,TypeError,KeyError):
             return False
-    return (old_runs=={"STAGE0-20261012-V6.5.1":299,
-                       "STAGE0-20261014-V6.5.1":2}
-            and daily_dates=={"2026-10-12","2026-10-13"})
+    return (run_counts=={"STAGE0-20261012-V6.5.1":299,
+                         "STAGE0-20261014-V6.5.1":2}
+            and latest_dates=={"2026-10-12","2026-10-13"})
 
 
 async def recover_tsla_prewrite(redis,*,now=None,sheet_reader=None):
@@ -75,7 +76,7 @@ async def recover_tsla_prewrite(redis,*,now=None,sheet_reader=None):
     lease=None
     try:
         lease=await batch.acquire()
-        pending=await redis.call("TSLAT",pending_key(DAY))
+        pending=await redis.call("GET",pending_key(DAY))
         if not isinstance(pending,str):
             raise Stage0Error("RECOVERY_NOT_REQUIRED","No verified PREPARED journal")
         try:
@@ -93,7 +94,7 @@ async def recover_tsla_prewrite(redis,*,now=None,sheet_reader=None):
             LOCK_SECONDS+RECOVERY_GRACE_SECONDS
         ):
             raise Stage0Error("RECOVERY_LEASE_NOT_EXPIRED","Lease grace not elapsed")
-        checkpoint_raw=await redis.call("TSLAT",state_key(DAY))
+        checkpoint_raw=await redis.call("GET",state_key(DAY))
         try:
             cp=json.loads(checkpoint_raw) if checkpoint_raw else {}
         except (ValueError,TypeError):
@@ -101,7 +102,7 @@ async def recover_tsla_prewrite(redis,*,now=None,sheet_reader=None):
         if (not isinstance(cp,dict)
             or (cp and (cp.get("version")!="V6.5.1" or cp.get("utc_date")!=DAY))
             or SYMBOL in (cp.get("completed_symbols") or [])):
-            raise Stage0Error("RECOVERY_CHECKPOINT_CHANTSLAD","Checkpoint not safe")
+            raise Stage0Error("RECOVERY_CHECKPOINT_CHANGED","Checkpoint not safe")
         reader=sheet_reader or read_sheet_footprint
         history,snapshots=await asyncio.to_thread(reader)
         if not old_history_is_immutable(history,snapshots,created):
@@ -113,9 +114,9 @@ async def recover_tsla_prewrite(redis,*,now=None,sheet_reader=None):
         )
         if int(success or 0)!=1:
             raise Stage0Error("RECOVERY_COMPARE_AND_DELETE_FAILED","Concurrent mutation")
-        if await redis.call("TSLAT",pending_key(DAY)):
+        if await redis.call("GET",pending_key(DAY)):
             raise Stage0Error("RECOVERY_READBACK_FAILED","Pending journal remains")
-        if (await redis.call("TSLAT",state_key(DAY)) or "")!=(checkpoint_raw or ""):
+        if (await redis.call("GET",state_key(DAY)) or "")!=(checkpoint_raw or ""):
             raise Stage0Error("RECOVERY_READBACK_FAILED","Checkpoint changed")
         return {"version":"V6.5.1","status":"TSLA_PREWRITE_ABORTED_VERIFIED",
                 "symbol":SYMBOL,"run_id":RUN_ID,
