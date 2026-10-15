@@ -324,6 +324,14 @@ class Provider:
             # Source permission failures are retained as missing fundamentals,
             # never converted into a failed price/history acquisition.
             for symbol in symbols:
+                # No ratios request after price/history failure: preserve quota.
+                q_ready=(qmap.get(symbol) or {}).get("status")=="READY"
+                h_expected=query.include_historical and symbol in history
+                h_ready=not h_expected or (history.get(symbol) or {}).get("status")=="READY"
+                if not q_ready or not h_ready:
+                    fundamentals[symbol]={"status":"PROVIDER_DEFERRED",
+                                           "error":"FMP_FUNDAMENTAL_PREREQUISITE_MISSING"}
+                    continue
                 quota = await self.state.quota() if self.state else None
                 if not quota or quota.get("blocked") or int(quota.get("remaining",0)) <= 40:
                     fundamentals[symbol] = {"status":"PROVIDER_DEFERRED",
@@ -394,7 +402,7 @@ class Provider:
                 errors.append(errors_profile)
             rows.append({"canonical_symbol": symbol, "enrichment_status": "PROVIDER_DEFERRED" if errors else "ACQUIRED_NOT_SCORED",
                          "source": "FMP", "data_timestamp": now_utc(),
-                         "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h) if v and v.get("source_url_template"))),
+                         "source_urls": list(dict.fromkeys(v["source_url_template"] for v in (q,p,h,fundamental) if v and v.get("source_url_template"))),
                          "fields": {k:v for k,v in fields.items() if v is not None}, "provider_errors": errors,
                          "fundamental_evidence": fundamental_evidence,
                          "fundamental_provider_status": (
