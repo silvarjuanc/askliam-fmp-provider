@@ -1328,6 +1328,7 @@ async def stage0_auto_config():
         "version": VERSION,
         "stage0_auto_enabled": os.getenv("ASKLIAM_STAGE0_AUTO_ENABLED", "").lower() == "true",
         "crypto_auto_enabled": os.getenv("ASKLIAM_CRYPTO_AUTO_ENABLED", "").lower() == "true",
+        "coinbase_spot_auto_enabled": os.getenv("ASKLIAM_COINBASE_SPOT_AUTO_ENABLED","false").lower()=="true",
         "fmp_stage0_enabled": os.getenv("ASKLIAM_STAGE0_ENABLED", "").lower() == "true",
         "manual_crypto_write_enabled": os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED", "").lower() == "true",
         "redis_configured": provider.state is not None,
@@ -1794,6 +1795,35 @@ async def stage0_check():
 class CoinbaseSpotCommitRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
     confirmation: str = Field(min_length=8, max_length=100)
+
+
+@app.post("/stage0/auto/coinbase-spot-step", dependencies=[Depends(require_token)])
+async def stage0_auto_coinbase_spot_step(request: CryptoAutomaticStepRequest):
+    """Authenticated scheduled acquisition of independent spot BTC/ETH only."""
+    from stage0_crypto_coinbase_commit import spot_commit_one,confirm_spot
+    from stage0_ingestor import Stage0Error
+    symbol=request.symbol.strip().upper()
+    if symbol not in ("BTC","ETH"):
+        raise HTTPException(422,"AUTOMATED_SPOT_SYMBOL_NOT_ENABLED")
+    if provider.state is None or provider.client is None:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE")
+    try:
+        return await spot_commit_one(
+            symbol,confirm_spot(symbol),redis=provider.state,
+            client=provider.client,automation_mode=True)
+    except Stage0Error as exc:
+        http=403 if exc.status in ("SPOT_AUTO_DISABLED","CRYPTO_AUTO_DISABLED",
+            "MANUAL_CRYPTO_WRITE_STILL_ENABLED","EXPLICIT_CONFIRMATION_REQUIRED"
+        ) else 409 if exc.status in (
+            "RECONCILIATION_REQUIRED","ALREADY_COMMITTED_TODAY",
+            "CONCURRENT_RUN_BLOCKED","SPOT_SNAPSHOT_COLLISION",
+            "CHECKPOINT_NOT_COMMITTED") else 503
+        raise HTTPException(http,{"stage0_status":exc.status,
+            "ranking_permitted":False,"execution_permitted":False,
+            "checkpoint_advanced":False}) from None
+    except Exception:
+        raise HTTPException(503,{"stage0_status":"AUTO_SPOT_STEP_HALTED",
+            "ranking_permitted":False,"execution_permitted":False}) from None
 
 
 @app.get("/stage0/crypto/coinbase-spot-ingest-preflight", dependencies=[Depends(require_token)])
