@@ -23,6 +23,8 @@ class Redis:
     def __init__(self):
         self.claims=set()
     async def call(self,*args):
+        if args[0]=="GET":
+            return None
         if args[0]=="SET" and "NX" in args:
             if args[1] in self.claims:
                 return None
