@@ -36,6 +36,28 @@ def confirm_spot(symbol: str) -> str:
     return SPOT_CONFIRM_PREFIX + symbol + SPOT_CONFIRM_SUFFIX
 
 
+def spot_automation_guard(symbol: str, confirmation: str) -> None:
+    """Dedicated cron-only BTC/ETH spot transaction gate (not manual mode).
+
+    The service's authenticated /auto route is the only invoker. Source,
+    journal, readback and checkpoint rules are unchanged.
+    """
+    if os.getenv("ASKLIAM_COINBASE_SPOT_AUTO_ENABLED","false").lower()!="true":
+        raise Stage0Error("SPOT_AUTO_DISABLED","Automatic independent spot source disabled")
+    if os.getenv("ASKLIAM_STAGE0_AUTO_ENABLED","false").lower()!="true" or (
+        os.getenv("ASKLIAM_CRYPTO_AUTO_ENABLED","false").lower()!="true"
+    ):
+        raise Stage0Error("CRYPTO_AUTO_DISABLED","Automation not enabled")
+    if os.getenv("ASKLIAM_CRYPTO_WRITE_ENABLED","false").lower()=="true" or (
+        os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_ENABLED","false").lower()=="true"
+    ):
+        raise Stage0Error("MANUAL_CRYPTO_WRITE_STILL_ENABLED","Manual writer must be disabled")
+    if symbol not in ("BTC","ETH") or confirmation!=confirm_spot(symbol):
+        raise Stage0Error("EXPLICIT_CONFIRMATION_REQUIRED","Unsupported canonical spot scope")
+    if not os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON") or not os.getenv("ASKLIAM_SPREADSHEET_ID"):
+        raise Stage0Error("SPOT_SHEETS_NOT_CONFIGURED","Sheets configuration missing")
+
+
 def spot_write_guard(symbol: str, confirmation: str) -> None:
     if os.getenv("ASKLIAM_COINBASE_SPOT_WRITE_ENABLED", "").lower() != "true":
         raise Stage0Error("SPOT_WRITE_DISABLED", "Explicit feature flag required")
@@ -181,9 +203,13 @@ async def spot_preflight(symbol, *, redis, client):
     }
 
 
-async def spot_commit_one(symbol, confirmation, *, redis, client, writer=_blocking_write):
+async def spot_commit_one(symbol, confirmation, *, redis, client, writer=_blocking_write,
+                          automation_mode: bool = False):
     symbol = str(symbol).strip().upper()
-    spot_write_guard(symbol, confirmation)
+    if automation_mode:
+        spot_automation_guard(symbol, confirmation)
+    else:
+        spot_write_guard(symbol, confirmation)
     now = datetime.now(timezone.utc)
     day = now.date().isoformat()
     run_id = "STAGE0-" + now.strftime("%Y%m%d") + "-V6.5.1"
