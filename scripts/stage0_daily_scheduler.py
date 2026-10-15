@@ -45,8 +45,12 @@ def schedule_gate(now: datetime) -> bool:
     local = now.astimezone(STOCKHOLM)
     # Cron UTC DST dual-slot; execute only at Stockholm-local scheduled windows.
     # Never begin ingestion during or after the 16:00 Stockholm daily analysis.
-    return (local.weekday() < 5 and local.hour in PRECLOSE_HOURS
-            and local.minute <= 10)
+    # A Render cold start or deploy can miss the exact minute. Permit
+    # bounded phase catch-up while leaving enough time BEFORE the next
+    # phase and the immutable 15:45 Sweden cutoff.
+    latest_start = {9: 40, 12: 20, 14: 15, 15: 10}
+    return (local.weekday() < 5 and local.hour in latest_start
+            and local.minute <= latest_start[local.hour])
 
 
 def safe_error(response: httpx.Response) -> str:
