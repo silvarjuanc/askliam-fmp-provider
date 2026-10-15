@@ -1971,3 +1971,41 @@ async def stage1_daily_audit(day: str | None = None):
         raise HTTPException(409,"AUDIT_CONTRACT_INVALID") from None
     except Exception:
         raise HTTPException(503,"AUDIT_SHEETS_READ_HALTED") from None
+
+
+# Dedicated Render wake cron. It holds only a separate random wake token.
+# The existing web service owns all data-source credentials and journals.
+@app.post("/stage0/scheduler/wake")
+async def stockholm_scheduler_wake(x_askliam_wake_token: str | None = Header(default=None)):
+    import secrets
+    from stage0_stockholm_orchestrator import accepted_wake
+    secret=os.environ.get("ASKLIAM_WAKE_TOKEN")
+    if not secret or not x_askliam_wake_token or not secrets.compare_digest(
+        secret,x_askliam_wake_token
+    ):
+        raise HTTPException(401,"UNAUTHORIZED_WAKE")
+    if provider.state is None:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE")
+    now=datetime.now(timezone.utc)
+    try:
+        return await accepted_wake(provider.state,now)
+    except StorageError:
+        raise HTTPException(503,"UPSTASH_UNAVAILABLE") from None
+
+
+@app.get("/stage0/scheduler/status", dependencies=[Depends(require_token)])
+async def stockholm_scheduler_status():
+    from stage0_stockholm_orchestrator import phase_for,preflight,result_key
+    now=datetime.now(timezone.utc)
+    phase=phase_for(now)
+    result={"version":VERSION,"preflight":preflight(now),
+            "schedule_clock":"Europe/Stockholm",
+            "phase":phase,"execution_permitted":False}
+    if phase and provider.state is not None:
+        try:
+            raw=await provider.state.call("GET",result_key(phase))
+            if raw:
+                result["phase_result"]=json.loads(raw)
+        except (StorageError,ValueError,TypeError):
+            result["phase_result"]="REDIS_UNAVAILABLE"
+    return result

@@ -9,6 +9,13 @@ from stage0_jpm_postwrite_reconcile import (
 from stage0_ingestor import Stage0Error
 
 UTC=timezone.utc
+# Historical reconciliation fixture is pinned to 2026-10-14; never let
+# the wall clock of a future CI run invalidate the fixture itself.
+class PinnedUtcDatetime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return NOW if tz is not None else NOW.replace(tzinfo=None)
+
 CREATED=datetime(2026,10,14,12,42,53,tzinfo=UTC)
 NOW=datetime(2026,10,14,13,9,tzinfo=UTC)
 CANDLES=[
@@ -112,7 +119,8 @@ class TestJpmPostwrite(unittest.TestCase):
 
     def test_success_advances_checkpoint_only_after_replay_and_readback(self):
         redis=FakeRedis()
-        with patch("stage0_jpm_postwrite_reconcile.Stage0BatchCoordinator",CoordinatorStub):
+        with (patch("stage0_jpm_postwrite_reconcile.Stage0BatchCoordinator",CoordinatorStub),
+              patch("stage0_jpm_postwrite_reconcile.datetime",PinnedUtcDatetime)):
             result=asyncio.run(reconcile_jpm_postwrite(
                 redis=redis,provider=FakeProvider(),now=NOW,sheet_reader=sheets))
         self.assertEqual(result["status"],"COMMITTED_VERIFY_PASS")
