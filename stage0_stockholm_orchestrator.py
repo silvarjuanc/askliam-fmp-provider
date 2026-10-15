@@ -20,6 +20,35 @@ LOG=logging.getLogger("uvicorn.error")
 PHASE_HOURS=(9,12,14,15)
 CONFIG_FLAGS=("ASKLIAM_STAGE0_ENABLED", "ASKLIAM_STAGE0_AUTO_ENABLED", "ASKLIAM_CRYPTO_AUTO_ENABLED")
 CRON_STATUS_TTL=72*3600
+# Upstream gateway failures alone may permit a single new phase attempt.
+# The actual ingestion always rechecks pending Redis journal/cursor/Sheets.
+RETRYABLE_HALTS={
+    "FMP_STEP_HALTED_HTTP_502",
+    "FMP_STEP_HALTED_HTTP_503",
+    "FMP_STEP_HALTED_HTTP_504",
+    "FMP_STEP_HALTED_HTTP_TRANSPORT_UNAVAILABLE",
+}
+RETRY_ONE_AFTER_VERIFIED_HALT_LUA = """
+local claim = redis.call('GET', KEYS[1])
+if claim ~= 'STARTED' then return 0 end
+local payload = redis.call('GET', KEYS[2])
+if not payload then return 0 end
+local ok, result = pcall(cjson.decode, payload)
+if not ok or type(result) ~= 'table' then return 0 end
+if result.version ~= ARGV[1] or result.phase ~= ARGV[2] then return 0 end
+if result.status ~= 'HALTED' then return 0 end
+if result.halt_reason ~= ARGV[3] and result.halt_reason ~= ARGV[4]
+   and result.halt_reason ~= ARGV[5] and result.halt_reason ~= ARGV[6] then
+    return 0
+end
+local prior_time = result.timestamp_utc or ''
+if type(prior_time) ~= 'string' or prior_time == '' then return 0 end
+redis.call('SET', KEYS[1], 'RETRY_1', 'EX', tonumber(ARGV[7]))
+-- Clear only the phase-result diagnostic, never any source journal,
+-- checkpoint, quota reservation or Sheets record.
+redis.call('DEL', KEYS[2])
+return 1
+"""
 
 
 def phase_for(now: datetime):
@@ -106,9 +135,11 @@ async def accepted_wake(redis, now, *, create_task=asyncio.create_task):
         return {"version":VERSION,"status":"UPSTASH_UNAVAILABLE","accepted":False}
     phase=phase_for(now)
     claimed=await redis.call("SET",attempt_key(phase),"STARTED","NX","EX",CRON_STATUS_TTL)
+    retry=False
     if claimed!="OK":
-        # The prior result is a sanitized runtime diagnostic, not a replay
-        # permission. It can be returned only to the wake-token holder.
+        # The previous result must be explicitly HALTED with a retryable
+        # gateway/transport error. An uncertain in-flight execution without
+        # a persisted result is NEVER retried automatically.
         raw=await redis.call("GET",result_key(phase))
         prior=None
         if raw:
@@ -116,9 +147,26 @@ async def accepted_wake(redis, now, *, create_task=asyncio.create_task):
                 prior=json.loads(raw)
             except (ValueError,TypeError):
                 prior={"status":"RESULT_UNREADABLE"}
-        return {"version":VERSION,"status":"PHASE_ALREADY_CLAIMED",
-                "phase":phase,"accepted":False,"prior_result":prior}
+        if (isinstance(prior,dict) and prior.get("version")==VERSION
+            and prior.get("phase")==phase
+            and prior.get("status")=="HALTED"
+            and prior.get("halt_reason") in RETRYABLE_HALTS):
+            # Atomic single retry; two overlapping wake requests cannot
+            # both claim it. Stage0's own transactional preflight remains
+            # authoritative for every subsequent source write.
+            code=await redis.eval(
+                RETRY_ONE_AFTER_VERIFIED_HALT_LUA,
+                [attempt_key(phase),result_key(phase)],
+                [VERSION,phase,*sorted(RETRYABLE_HALTS),CRON_STATUS_TTL]
+            )
+            retry=code==1
+        if not retry:
+            return {"version":VERSION,"status":"PHASE_ALREADY_CLAIMED",
+                    "phase":phase,"accepted":False,"prior_result":prior}
     create_task(run_phase(redis,phase,now))
-    LOG.info("STOCKHOLM_PHASE_ACCEPTED phase=%s",phase)
-    return {"version":VERSION,"status":"PHASE_ACCEPTED","phase":phase,
-            "accepted":True,"ranking_permitted":False,"execution_permitted":False}
+    LOG.info("STOCKHOLM_PHASE_%s phase=%s",
+             "SAFE_RETRY_ACCEPTED" if retry else "ACCEPTED",phase)
+    return {"version":VERSION,
+            "status":"PHASE_SAFE_RETRY_ACCEPTED" if retry else "PHASE_ACCEPTED",
+            "phase":phase,"accepted":True,
+            "ranking_permitted":False,"execution_permitted":False}
