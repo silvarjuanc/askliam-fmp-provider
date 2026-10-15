@@ -51,7 +51,14 @@ class SchedulerTests(unittest.TestCase):
         self.assertFalse(schedule_gate(datetime(2026,10,13,14,0,tzinfo=UTC))) # 16:00 CEST
         self.assertFalse(schedule_gate(datetime(2026,12,14,15,0,tzinfo=UTC))) # 16:00 CET
         self.assertFalse(schedule_gate(datetime(2026,10,17,7,0,tzinfo=UTC)))  # Saturday
+        self.assertTrue(schedule_gate(datetime(2026,10,13,13,10,tzinfo=UTC)))
         self.assertFalse(schedule_gate(datetime(2026,10,13,13,11,tzinfo=UTC)))
+        self.assertTrue(schedule_gate(datetime(2026,10,13,7,30,tzinfo=UTC)))
+        self.assertFalse(schedule_gate(datetime(2026,10,13,7,41,tzinfo=UTC)))
+        self.assertTrue(schedule_gate(datetime(2026,10,13,10,20,tzinfo=UTC)))
+        self.assertFalse(schedule_gate(datetime(2026,10,13,10,21,tzinfo=UTC)))
+        self.assertTrue(schedule_gate(datetime(2026,10,13,12,15,tzinfo=UTC)))
+        self.assertFalse(schedule_gate(datetime(2026,10,13,12,16,tzinfo=UTC)))
         self.assertFalse(schedule_gate(datetime(2026,10,13,13,45,tzinfo=UTC)))
         # European DST fall-back (2026-10-25) keeps 09:00 CET as 08:00 UTC.
         self.assertTrue(schedule_gate(datetime(2026,10,26,8,0,tzinfo=UTC)))
