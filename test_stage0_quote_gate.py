@@ -20,6 +20,13 @@ class FakeBook:
                                "Symbol": "BE", "Asset Class": "Equity"}])
         if name == "Market_Data_Snapshot":
             return FakeSheet([])
+        if name == "Data_Requirements":
+            return FakeSheet([
+                {"Model":"EQUITY_V2","Broad Min %":"70",
+                 "Broad Mandatory Data":"last_price; fundamental_factor_count>=1"},
+                {"Model":"INDEX_V1","Broad Min %":"70",
+                 "Broad Mandatory Data":"last_price; macro_score; breadth_score_or_proxy"},
+            ])
         raise AssertionError(name)
 
 

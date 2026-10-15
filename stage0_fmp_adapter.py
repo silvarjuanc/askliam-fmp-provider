@@ -43,6 +43,23 @@ KNOWN_SOURCE_CODES = {
 }
 
 
+def apply_model_requirements(snapshot, models):
+    """Inspect exact workbook model; never synthesize missing data or GO."""
+    from stage0_model_readiness import validate_mandatory
+    model = snapshot["score_model"]
+    if model not in models:
+        raise RuntimeError("DATA_REQUIREMENTS_MISSING_MODEL")
+    gate = validate_mandatory(snapshot, models[model])
+    snapshot = dict(snapshot)
+    snapshot["missing_mandatory_fields"] = (
+        "; ".join(gate["missing"]) if gate["missing"] else "NONE"
+    )
+    snapshot["data_completeness_pct"] = gate["mandatory_coverage_pct"]
+    # Completeness is not source validation or live quote freshness.
+    snapshot["mandatory_broad_pass"] = "FALSE"
+    return snapshot
+
+
 class ExistingFMPStage0Adapter:
     def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8, symbols=None):
         self.spreadsheet = spreadsheet
@@ -114,6 +131,21 @@ class ExistingFMPStage0Adapter:
                 except (ValueError, TypeError):
                     pass
                 break
+        # The model contract is taken from the CURRENT workbook. Never
+        # apply EQUITY_V2 mandatory fields to INDEX_V1 snapshots.
+        self.phase = "MODEL_CONTRACT"
+        requirements = self.spreadsheet.worksheet("Data_Requirements").get_all_records(
+            numericise_ignore=["all"]
+        )
+        models = {}
+        for spec in requirements:
+            model = str(spec.get("Model", "")).strip()
+            if model:
+                if model in models:
+                    raise RuntimeError("DATA_REQUIREMENTS_DUPLICATE_MODEL")
+                models[model] = spec
+        if not all(model in models for model in ("EQUITY_V2", "INDEX_V1")):
+            raise RuntimeError("DATA_REQUIREMENTS_MISSING_MODEL")
         priority.sort(key=lambda pair: (pair[0] not in deferred, pair[0]))
         if self.requested_symbols:
             known = {sym: item for sym, item in priority}
@@ -221,19 +253,17 @@ class ExistingFMPStage0Adapter:
             source = ";".join(urls)
             # Mandatory fields not yet synthesized must remain missing. This
             # avoids false positives and mass DATA_WAIT.
-            missing = [
-                name for name in ("last_price", "return_1m", "return_3m", "volatility_20d",
-                                  "momentum_score", "trend_score", "relative_strength_score",
-                                  "volume_score", "macro_score", "fundamental_factor_count")
-                if fields.get(name) is None
-            ]
+            # The exact model-specific mandatory set is computed AFTER the
+            # canonical snapshot fields are materialized below.
+            model = ("EQUITY_V2" if "equity" in
+                     str(item.get("Asset Class", "")).lower() else "INDEX_V1")
             if errors:
                 failed.append(f"{symbol}:{','.join(map(str, errors))}")
             snapshot = {
                 "ranking_run_id": self.run_id,
                 "canonical_symbol": symbol,
                 "asset_class": item.get("Asset Class", ""),
-                "score_model": "EQUITY_V2" if "equity" in str(item.get("Asset Class", "")).lower() else "INDEX_V1",
+                "score_model": model,
                 "data_timestamp": result.get("data_timestamp") or now,
                 "analysis_price_source": "FMP_STABLE" if fields.get("last_price") is not None else "",
                 "last_price": fields.get("last_price"),
@@ -253,7 +283,7 @@ class ExistingFMPStage0Adapter:
                 "trend_score": fields.get("trend_score"),
                 "relative_strength_score": fields.get("relative_strength_score"),
                 "volume_score": fields.get("volume_score"),
-                "missing_mandatory_fields": "; ".join(missing),
+                "missing_mandatory_fields": "NOT_EVALUATED",
                 "missing_optional_fields": "NOT_EVALUATED",
                 "source_summary": source,
                 "data_completeness_pct": "",
@@ -262,6 +292,7 @@ class ExistingFMPStage0Adapter:
                 "enrichment_status": "PROVIDER_DEFERRED" if (errors or not success) else "ENRICHMENT_PENDING",
                 "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
             }
+            snapshot = apply_model_requirements(snapshot, models)
             quotes.append(snapshot)
             historical_counts[symbol] = 0
             # Never persist an unconfirmed in-session bar whose volume is
