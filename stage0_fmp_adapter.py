@@ -43,6 +43,23 @@ KNOWN_SOURCE_CODES = {
 }
 
 
+def apply_model_requirements(snapshot, models):
+    """Inspect exact workbook model; never synthesize missing data or GO."""
+    from stage0_model_readiness import validate_mandatory
+    model = snapshot["score_model"]
+    if model not in models:
+        raise RuntimeError("DATA_REQUIREMENTS_MISSING_MODEL")
+    gate = validate_mandatory(snapshot, models[model])
+    snapshot = dict(snapshot)
+    snapshot["missing_mandatory_fields"] = (
+        "; ".join(gate["missing"]) if gate["missing"] else "NONE"
+    )
+    snapshot["data_completeness_pct"] = gate["mandatory_coverage_pct"]
+    # Completeness is not source validation or live quote freshness.
+    snapshot["mandatory_broad_pass"] = "FALSE"
+    return snapshot
+
+
 class ExistingFMPStage0Adapter:
     def __init__(self, spreadsheet, run_id, *, max_symbols=8, historical_budget=8, symbols=None):
         self.spreadsheet = spreadsheet
@@ -238,7 +255,6 @@ class ExistingFMPStage0Adapter:
             # avoids false positives and mass DATA_WAIT.
             # The exact model-specific mandatory set is computed AFTER the
             # canonical snapshot fields are materialized below.
-            from stage0_model_readiness import validate_mandatory
             model = ("EQUITY_V2" if "equity" in
                      str(item.get("Asset Class", "")).lower() else "INDEX_V1")
             if errors:
@@ -276,15 +292,7 @@ class ExistingFMPStage0Adapter:
                 "enrichment_status": "PROVIDER_DEFERRED" if (errors or not success) else "ENRICHMENT_PENDING",
                 "notes": "Stage0 acquisition only; no canonical macro/fundamental/momentum scoring",
             }
-            # Coverage is an input diagnostic, NOT permission to score.
-            gate = validate_mandatory(snapshot, models[model])
-            snapshot["missing_mandatory_fields"] = (
-                "; ".join(gate["missing"]) if gate["missing"] else "NONE"
-            )
-            snapshot["data_completeness_pct"] = gate["mandatory_coverage_pct"]
-            # Stage0 does not verify canonical macro, source provenance and
-            # independent live prices; preserve the analytical hard gate.
-            snapshot["mandatory_broad_pass"] = "FALSE"
+            snapshot = apply_model_requirements(snapshot, models)
             quotes.append(snapshot)
             historical_counts[symbol] = 0
             # Never persist an unconfirmed in-session bar whose volume is
