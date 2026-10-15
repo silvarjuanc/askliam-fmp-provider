@@ -79,6 +79,9 @@ class Stage0_Daily_Ingestor:
         # True from immediately before FIRST possible Sheets mutation.
         # Only the false state can authorize automatic PREWRITE abort.
         self.write_attempted = False
+        # Optional durable Redis witness installed by the FMP coordinator.
+        # Called from the blocking worker BEFORE any Sheet mutation.
+        self.journal_stage_hook = None
         if not self.spreadsheet_id:
             raise Stage0Error("CONFIGURATION_FAILED", "ASKLIAM_SPREADSHEET_ID is missing")
         if not self.providers or not all(callable(p) for p in self.providers.values()):
@@ -407,6 +410,10 @@ class Stage0_Daily_Ingestor:
         try:
             before = self._capture(self._open())
             before_hash = self._fingerprint(before)
+            if self.journal_stage_hook is not None:
+                # The PREPARED journal now carries an exact immutable
+                # baseline, even when 300 historical OHLCV rows already exist.
+                self.journal_stage_hook("CAPTURED", before_hash)
             frames = self._collect()
             plans, expected = self._plan(before, frames)
             # Reject silent no-op success when no provider supplied any rows.
@@ -415,6 +422,16 @@ class Stage0_Daily_Ingestor:
             fresh = self._capture(self._open())
             if self._fingerprint(fresh) != before_hash:
                 raise Stage0Error("CONCURRENT_MODIFICATION", "Workbook changed after STATE_BEFORE")
+            if self.journal_stage_hook is not None:
+                # Record the full expected post-write fingerprint in Redis
+                # atomically under the same exclusive lease BEFORE _commit.
+                # An interrupted writer can then be reconciled from Sheets
+                # WITHOUT replaying ambiguous writes or deleting history.
+                expected_hash = self._fingerprint({
+                    tab: {"headers": fresh[tab]["headers"], "rows": expected[tab]}
+                    for tab in TABS
+                })
+                self.journal_stage_hook("WRITE_INTENT", expected_hash)
             self.write_attempted = True
             committed = True  # a write could succeed and the response fail
             try:

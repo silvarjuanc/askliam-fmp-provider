@@ -6,6 +6,7 @@ No ranking, trading or lifecycle writes occur here.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import secrets
@@ -295,11 +296,16 @@ return redis.call('DEL', KEYS[2])
         # Reuse the same run ID per UTC day to update rather than append
         # snapshots for the same asset on retry.
         run_id = "STAGE0-" + day.replace("-", "") + "-V6.5.1"
+        # Capture the exact prior checkpoint for recovery CAS. Never assume
+        # that it stayed unchanged across a server restart or lease expiry.
+        previous_raw = await self.redis.call("GET", state_key(day))
         journal = {
             "status": "PREPARED",
+            "version": "V6.5.1",
             "run_id": run_id,
             "symbols": symbols,
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "previous_checkpoint_raw": previous_raw or "",
         }
         pending_written = await self.redis.call(
             "SET", pending_key(day),
@@ -309,12 +315,76 @@ return redis.call('DEL', KEYS[2])
             raise Stage0Error("RECONCILIATION_REQUIRED", "Another pending journal exists")
         return day, run_id, state["checkpoint"]
 
-    def run_blocking(self, symbols, run_id):
+    async def record_write_evidence(self, day, run_id, symbols, token, phase, fingerprint):
+        """CAS-write one SHA256 witness while the original Stage0 lease is held.
+
+        CAPTURED: exact STATE_BEFORE digest, PREPARED only.
+        WRITE_INTENT: exact expected full readback digest, prior to any write.
+        Redis refusal halts the worker before it can mutate Google Sheets.
+        """
+        if (phase not in ("CAPTURED", "WRITE_INTENT")
+            or not isinstance(fingerprint, str) or len(fingerprint) != 64
+            or any(c not in "0123456789abcdef" for c in fingerprint)):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "INVALID_EVIDENCE_DIGEST")
+        raw = await self.redis.call("GET", pending_key(day))
+        if not isinstance(raw, str):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PENDING_JOURNAL_MISSING")
+        try:
+            j = json.loads(raw)
+        except (ValueError, TypeError):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PENDING_JOURNAL_INVALID") from None
+        expected_status = "PREPARED"
+        if (j.get("run_id") != run_id or j.get("symbols") != symbols
+            or j.get("status") != expected_status
+            or j.get("version") != "V6.5.1"):
+            raise Stage0Error("RECONCILIATION_REQUIRED", "PENDING_JOURNAL_CHANGED")
+        if phase == "CAPTURED":
+            if j.get("before_fingerprint"):
+                raise Stage0Error("RECONCILIATION_REQUIRED", "DUPLICATE_BASELINE_EVIDENCE")
+            j["before_fingerprint"] = fingerprint
+        else:
+            if not j.get("before_fingerprint"):
+                raise Stage0Error("RECONCILIATION_REQUIRED", "BASELINE_EVIDENCE_MISSING")
+            if j.get("expected_fingerprint"):
+                raise Stage0Error("RECONCILIATION_REQUIRED", "DUPLICATE_WRITE_INTENT")
+            j["expected_fingerprint"] = fingerprint
+            j["status"] = "WRITE_INTENT"
+        # Only advance journal metadata after Redis lease+exact value CAS.
+        script = """
+if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call('GET', KEYS[2]) ~= ARGV[2] then return 0 end
+redis.call('SET', KEYS[2], ARGV[3])
+return 1
+"""
+        ok = await self.redis.eval(
+            script, [LOCK_KEY, pending_key(day)],
+            [token, raw, json.dumps(j, separators=(",", ":"))],
+        )
+        if int(ok or 0) != 1:
+            raise Stage0Error("RECONCILIATION_REQUIRED", "JOURNAL_EVIDENCE_CAS_FAILED")
+
+    def run_blocking(self, symbols, run_id, day=None, token=None, loop=None):
         ingestor = Stage0_Daily_Ingestor(
             providers={"fmp": lambda: adapter()},
             spreadsheet_id=self.spreadsheet_id,
         )
         ingestor.run_id = run_id
+        if day is not None or token is not None or loop is not None:
+            if day is None or token is None or loop is None:
+                raise Stage0Error("CONFIGURATION_FAILED", "INCOMPLETE_JOURNAL_WITNESS")
+            def journal_hook(phase, fingerprint):
+                witness = asyncio.run_coroutine_threadsafe(
+                    self.record_write_evidence(day, run_id, symbols, token, phase, fingerprint),
+                    loop,
+                )
+                try:
+                    witness.result(timeout=30)
+                except Stage0Error:
+                    raise
+                except Exception:
+                    # Never start Sheets mutation when Redis witness is uncertain.
+                    raise Stage0Error("RECONCILIATION_REQUIRED", "JOURNAL_EVIDENCE_UNAVAILABLE") from None
+            ingestor.journal_stage_hook = journal_hook
         try:
             book = ingestor._open()
             adapter = ExistingFMPStage0Adapter(

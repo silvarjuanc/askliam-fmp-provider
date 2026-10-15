@@ -84,17 +84,26 @@ class SchedulerTests(unittest.TestCase):
     def test_pending_reconciliation_stops_all_writes(self):
         calls = []
         def fake_request(client, method, path, token, **kw):
-            calls.append(method)
+            calls.append((method, path))
             if path == "/stage0/auto/config":
                 return dict(version=VERSION, stage0_auto_enabled=True, crypto_auto_enabled=True,
                             fmp_stage0_enabled=True, redis_configured=True,
                             sheets_configured=True, manual_crypto_write_enabled=False)
+            if path == "/stage0/reconciliation/auto-recover":
+                return {"version": VERSION, "status": "RECOVERY_DEFERRED",
+                        "reason": "LEGACY_OR_INVALID_JOURNAL", "changed": False}
             return dict(version=VERSION, utc_date="2026-10-13",pending_reconciliation=True)
         with patch("scripts.stage0_daily_scheduler.request", new=fake_request):
             out = run(object(), "secret", now=SUMMER)
         self.assertEqual(out["status"], "HALTED")
         self.assertEqual(out["halt_reason"], "RECONCILIATION_REQUIRED")
-        self.assertNotIn("POST", calls)
+        self.assertEqual(calls, [
+            ("GET", "/stage0/auto/config"),
+            ("GET", "/stage0/batch/status"),
+            ("POST", "/stage0/reconciliation/auto-recover"),
+        ])
+        # Recovery is authenticated, readback-only and fail-closed; never
+        # proceeds to POST /stage0/daily/step while pending remains.
 
     def test_eight_verified_crypto_idempotent_then_fmp_budget_guard(self):
         completed = {"ADA", "BTC"}
