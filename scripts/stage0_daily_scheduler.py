@@ -104,7 +104,20 @@ def assert_state(client, token: str, day: str) -> dict:
     if state.get("utc_date") != day:
         raise SchedulerHalt("UTC_DAY_CHANGED")
     if state.get("pending_reconciliation"):
-        raise SchedulerHalt("RECONCILIATION_REQUIRED")
+        # Fail-closed self-heal: the server examines a durable SHA256
+        # before/expected witness under a fresh lease, then independently
+        # reads back all three Stage0 tabs. No ambiguous write is replayed.
+        recovery = request(client, "POST",
+                           "/stage0/reconciliation/auto-recover", token)
+        if recovery.get("status") in (
+            "RECOVERED_VERIFIED_NO_WRITE", "RECOVERED_COMMITTED_VERIFY_PASS",
+            "NO_PENDING_JOURNAL",
+        ):
+            state = request(client, "GET", "/stage0/batch/status", token)
+        if state.get("pending_reconciliation"):
+            raise SchedulerHalt("RECONCILIATION_REQUIRED")
+        if state.get("utc_date") != day:
+            raise SchedulerHalt("UTC_DAY_CHANGED")
     return state
 
 
