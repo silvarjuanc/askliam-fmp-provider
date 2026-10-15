@@ -149,6 +149,7 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
         "crypto_provider_deferred": [],
         "fmp_verified": [],
         "fmp_deferred": [],
+        "fmp_transient_held": [],
         "fmp_stop_reason": "",
         "ranking_permitted": False,
         "execution_permitted": False,
@@ -209,6 +210,22 @@ def run(client, token: str, *, now=None, sleep=time.sleep, max_wall_seconds=MAX_
                     raise SchedulerHalt("FMP_DEFERRED_INCONSISTENT")
                 result["fmp_deferred"].append(expected)
             elif step.get("status") == "SOURCE_RETRYABLE":
+                if step.get("symbol") != expected or step.get("checkpoint_advanced") is not False:
+                    raise SchedulerHalt("FMP_RETRYABLE_INCONSISTENT")
+                # Only a proven PREWRITE hold can be skipped. Postwrite errors
+                # are never automatically retried or forgotten.
+                if step.get("temporarily_held") is True:
+                    current = assert_state(client, token, day)
+                    transient = current.get("transient_prewrite_today") or {}
+                    completed = set(
+                        (current.get("checkpoint") or {}).get("completed_symbols") or []
+                    )
+                    if expected not in transient or expected in completed:
+                        raise SchedulerHalt("PREWRITE_HOLD_NOT_VERIFIED")
+                    if expected in result["fmp_transient_held"]:
+                        raise SchedulerHalt("PREWRITE_HOLD_QUEUE_NOT_ADVANCING")
+                    result["fmp_transient_held"].append(expected)
+                    continue
                 result["fmp_stop_reason"] = "FMP_RETRYABLE_SOURCE"
                 break
             elif step.get("status") == "FMP_QUEUE_EMPTY":

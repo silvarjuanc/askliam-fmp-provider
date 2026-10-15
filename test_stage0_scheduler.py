@@ -228,6 +228,53 @@ class SchedulerTests(unittest.TestCase):
         )
         self.assertNotIn(("POST","/stage0/auto/crypto-step"),paths)
 
+    def test_prewrite_hold_continues_to_next_symbol_without_journal_bypass(self):
+        from collections import Counter
+        held=set()
+        completed=set()
+        order=[]
+        phase="GE"
+        def fake_request(client,method,path,token,*,json_body=None):
+            nonlocal phase
+            order.append((method,path))
+            if path=="/stage0/auto/config":
+                return dict(version=VERSION,stage0_auto_enabled=True,crypto_auto_enabled=True,
+                            fmp_stage0_enabled=True,redis_configured=True,
+                            sheets_configured=True,manual_crypto_write_enabled=False)
+            if path=="/stage0/batch/status":
+                return dict(version=VERSION,utc_date="2026-10-13",
+                            pending_reconciliation=False,quota={"remaining":180,"blocked":False},
+                            transient_prewrite_today={x:"SHEET_READ_FAILED_PREWRITE" for x in held},
+                            checkpoint={"completed_symbols":sorted(completed)})
+            if path.startswith("/stage0/crypto/checkpoint"):
+                return dict(version=VERSION,utc_date="2026-10-13",
+                            completed_symbols=list(CRYPTO),spot_completed_symbols=[],
+                            pending_reconciliation=False)
+            if path=="/stage0/daily/plan":
+                queued=[x for x in ("GE","SPY") if x not in held|completed]
+                return dict(version=VERSION,utc_date="2026-10-13",next_symbols=queued[:1],
+                            pending_reconciliation=False)
+            if path=="/stage0/daily/step":
+                if "GE" not in held:
+                    held.add("GE")
+                    return dict(version=VERSION,status="SOURCE_RETRYABLE",
+                                symbol="GE",checkpoint_advanced=False,
+                                temporarily_held=True)
+                completed.add("SPY")
+                return dict(version=VERSION,daily_symbol="SPY",commit_status="COMMITTED",
+                            verify_status="PASS",checkpoint_status="COMMITTED_VERIFY_PASS")
+            if path=="/stage0/auto/runtime-evidence-sync":
+                return dict(version=VERSION,sync_status="COMMITTED_VERIFY_PASS",
+                            spot_verified=[],fmp_used=2,fmp_remaining=238)
+            raise AssertionError(path)
+        with patch("scripts.stage0_daily_scheduler.request",new=fake_request):
+            out=run(object(),"secret",now=SUMMER,sleep=lambda _:None)
+        self.assertEqual(out["status"],"STAGE0_VERIFIED_OR_PROVIDER_DEFERRED")
+        self.assertEqual(out["fmp_transient_held"],["GE"])
+        self.assertEqual(out["fmp_verified"],["SPY"])
+        self.assertEqual(len([x for x in order if x==("POST","/stage0/daily/step")]),2)
+        self.assertFalse(out["ranking_permitted"])
+
     def test_precutoff_1600_stops_before_any_remote_action(self):
         with patch("scripts.stage0_daily_scheduler.request") as request:
             out=run(object(),"secret",now=datetime(2026,10,13,20,0,tzinfo=UTC))
