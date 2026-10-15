@@ -862,6 +862,25 @@ async def _read_only_stage1_smoke_once():
 
 
 @asynccontextmanager
+async def _recover_tsla_legacy_prewrite_once():
+    """Opt-in exact journal repair; never touches market history or trades."""
+    import logging
+    local_log = logging.getLogger("uvicorn.error")
+    from stage0_tsla_legacy_prewrite_recovery import recover_tsla_prewrite
+    if provider.state is None:
+        local_log.error("TSLA_PREWRITE_RECOVERY_HALTED reason=UPSTASH_UNAVAILABLE")
+        return
+    try:
+        result = await recover_tsla_prewrite(provider.state)
+        local_log.info("TSLA_PREWRITE_RECOVERY_PASS status=%s rows=%s checkpoint_advanced=%s",
+                       result["status"], result["verified_historical_rows"],
+                       result["checkpoint_advanced"])
+    except Exception as exc:
+        from stage0_ingestor import Stage0Error
+        reason = exc.status if isinstance(exc, Stage0Error) else "UNKNOWN_RECONCILIATION_FAILURE"
+        local_log.error("TSLA_PREWRITE_RECOVERY_HALTED reason=%s", reason)
+
+
 async def lifespan(app: FastAPI):
     import logging
     boot_log = logging.getLogger("uvicorn.error")
@@ -919,6 +938,15 @@ async def lifespan(app: FastAPI):
     ge_recovery_task = None
     if allow_startup_oneshots and os.getenv("ASKLIAM_STAGE0_GE_PREWRITE_RECOVER_ONCE_DAY", "") == day_utc():
         ge_recovery_task = asyncio.create_task(_recover_ge_legacy_prewrite_once())
+    # Strict one-day, one-symbol legacy maintenance. Two explicit opt-in
+    # flags; no global startup maintenance toggle is required, and no
+    # source/market/trade writes are performed. The recovery itself verifies
+    # exact Redis pending, immutable historical Sheets and Redis CAS.
+    tsla_recovery_task = None
+    if (os.getenv("ASKLIAM_STAGE0_TSLA_PREWRITE_RECOVER_ONCE_DAY") == "2026-10-15"
+        and os.getenv("ASKLIAM_STAGE0_TSLA_RECOVER_CONFIRM") == "VERIFY_LEGACY_TSLA_PREWRITE_ONLY"
+        and day_utc() == "2026-10-15"):
+        tsla_recovery_task = asyncio.create_task(_recover_tsla_legacy_prewrite_once())
     jpm_recovery_task = None
     if allow_startup_oneshots and os.getenv("ASKLIAM_FMP_JPM_POSTWRITE_RECOVER_UTC_DAY", "") == day_utc():
         jpm_recovery_task = asyncio.create_task(_jpm_postwrite_reconcile_once())
@@ -947,6 +975,12 @@ async def lifespan(app: FastAPI):
             ge_recovery_task.cancel()
             try:
                 await ge_recovery_task
+            except asyncio.CancelledError:
+                pass
+        if tsla_recovery_task is not None and not tsla_recovery_task.done():
+            tsla_recovery_task.cancel()
+            try:
+                await tsla_recovery_task
             except asyncio.CancelledError:
                 pass
         if journal_task is not None and not journal_task.done():
