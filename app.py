@@ -864,6 +864,24 @@ async def _read_only_stage1_smoke_once():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await provider.start()
+    # One Redis GET, read-only; never run ingestion or recovery on startup.
+    # Makes a legacy pending journal diagnosable from Render without
+    # exposing auth tokens or requiring a protected endpoint call.
+    try:
+        if provider.state is not None:
+            from stage0_journal_diagnostic import summarize_pending_journal
+            jdiag = await summarize_pending_journal(provider.state)
+            rid = str(jdiag.get("run_id") or "")
+            stamp = str(jdiag.get("created_at_utc") or "")
+            if not re.fullmatch(r"STAGE0-[0-9]{8}-V6[.]5[.]1", rid):
+                rid = "UNTRUSTED_RUN_ID"
+            if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+Z-]{5,35}", stamp):
+                stamp = "INVALID_TIMESTAMP"
+            log.info("V651_JOURNAL_BOOT_DIAG pending=%s stage=%s symbols=%s run=%s created=%s",
+                     jdiag.get("pending"), jdiag.get("status"),
+                     ",".join(jdiag.get("symbols") or []), rid, stamp)
+    except Exception as exc:
+        log.warning("V651_JOURNAL_BOOT_DIAG_UNAVAILABLE class=%s",type(exc).__name__)
     audit_task = None
     if os.getenv("ASKLIAM_STAGE1_AUDIT_SMOKE_UTC_DAY", "") == day_utc():
         audit_task=asyncio.create_task(_read_only_daily_audit_once())
