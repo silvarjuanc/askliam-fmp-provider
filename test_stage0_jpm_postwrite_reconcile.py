@@ -119,8 +119,8 @@ class TestJpmPostwrite(unittest.TestCase):
 
     def test_success_advances_checkpoint_only_after_replay_and_readback(self):
         redis=FakeRedis()
-        with patch("stage0_jpm_postwrite_reconcile.Stage0BatchCoordinator",CoordinatorStub), \\
-                patch("stage0_jpm_postwrite_reconcile.datetime",PinnedUtcDatetime):
+        with (patch("stage0_jpm_postwrite_reconcile.Stage0BatchCoordinator",CoordinatorStub),
+              patch("stage0_jpm_postwrite_reconcile.datetime",PinnedUtcDatetime)):
             result=asyncio.run(reconcile_jpm_postwrite(
                 redis=redis,provider=FakeProvider(),now=NOW,sheet_reader=sheets))
         self.assertEqual(result["status"],"COMMITTED_VERIFY_PASS")
